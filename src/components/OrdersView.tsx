@@ -196,25 +196,37 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             // active orders can never inherit the viewer's coordinates or each other's route.
             const isLiveTransaction = order.status !== 'completed' && order.status !== 'cancelled';
             const supplyItem = order.items[0];
-            const orderFarmer = registeredUsers.find(
-              (u) =>
-                u.role === 'farmer' &&
-                ((order.farmerId && u.id === order.farmerId) ||
-                  (order.farmName &&
-                    u.farmName &&
-                    order.farmName.trim().toLowerCase() === u.farmName.trim().toLowerCase()))
-            );
+            const orderFarmer =
+              (currentUser?.role === 'farmer' && (
+                (order.farmerId && currentUser.id === order.farmerId) ||
+                (order.farmName && currentUser.farmName && order.farmName.trim().toLowerCase() === currentUser.farmName.trim().toLowerCase()) ||
+                userRole === 'farmer'
+              ))
+                ? currentUser
+                : registeredUsers.find(
+                    (u) =>
+                      u.role === 'farmer' &&
+                      ((order.farmerId && u.id === order.farmerId) ||
+                        (order.farmName &&
+                          u.farmName &&
+                          order.farmName.trim().toLowerCase() === u.farmName.trim().toLowerCase()))
+                  );
+
+            // Textual farm address: must represent the farm, never the supermarket delivery address
+            const farmLocation =
+              orderFarmer?.location ||
+              (userRole === 'farmer' && currentUser?.location ? currentUser.location : '') ||
+              (order.pickupSlot && !order.pickupSlot.includes('Supermarket') ? order.pickupSlot : '');
+
             const farmHouse =
-              isLiveTransaction && (orderFarmer || supplyItem)
+              isLiveTransaction && (orderFarmer || supplyItem || userRole === 'farmer')
                 ? resolveFarmHouseCoordinates({
-                    // Only the supplying farmer's own pinned GPS is a valid direct pin.
-                    ...(orderFarmer?.id === (supplyItem?.farmerId || order.farmerId)
-                      ? { latitude: orderFarmer.latitude, longitude: orderFarmer.longitude }
-                      : {}),
-                    farmerId: order.farmerId,
-                    farmName: order.farmName,
-                    farmerName: supplyItem?.farmerName || orderFarmer?.name,
-                    locationText: orderFarmer?.location || order.deliveryAddress,
+                    latitude: orderFarmer?.latitude || (userRole === 'farmer' ? currentUser?.latitude : undefined),
+                    longitude: orderFarmer?.longitude || (userRole === 'farmer' ? currentUser?.longitude : undefined),
+                    farmerId: order.farmerId || orderFarmer?.id,
+                    farmName: order.farmName || orderFarmer?.farmName || (userRole === 'farmer' ? currentUser?.farmName : undefined),
+                    farmerName: supplyItem?.farmerName || orderFarmer?.name || (userRole === 'farmer' ? currentUser?.name : undefined),
+                    locationText: farmLocation,
                     registeredUsers,
                     itemFarmerId: supplyItem?.farmerId,
                     itemFarmerName: supplyItem?.farmerName,
@@ -322,14 +334,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   </div>
                 </div>
 
-                {/* LIVE ROUTE MAP: Supermarket Hub ➔ Farmer's House */}
+                {/* LIVE ROUTE MAP: Farmer's House (Left) ➔ Supermarket Hub (Right) */}
                 {farmHouse && (
                   <div className="border border-red-200 bg-red-50/40 rounded-2xl overflow-hidden">
                     <div className="flex items-center justify-between gap-2 px-2.5 py-2 bg-gradient-to-r from-red-700 to-red-600 text-white">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="text-[11px] font-black uppercase tracking-wide truncate">
-                          Pickup Route to {farmHouse.label}
+                          Live Procurement Route: {farmHouse.label} ➔ {supermarket.storeName}
                         </span>
                       </div>
                       <span className="text-[9px] bg-white/20 font-extrabold px-1.5 py-0.5 rounded flex-shrink-0">
@@ -339,10 +351,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
                     <FarmRouteMap
                       routeKey={order.id}
-                      origin={supermarketHub}
-                      destination={farmHouse.coords}
-                      originLabel={supermarket.storeName}
-                      destinationLabel={farmHouse.label}
+                      origin={farmHouse.coords}
+                      destination={supermarketHub}
+                      originLabel={farmHouse.label}
+                      destinationLabel={supermarket.storeName}
+                      originEmoji="🌱"
+                      destinationEmoji="🏪"
                       heightClassName="h-60"
                       onRouteCalculated={(km, durationText) => {
                         setRouteStatsByOrder((prev) =>
@@ -354,22 +368,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         );
                       }}
                     />
-
-                    <div className="flex items-center justify-between gap-2 px-2.5 py-2 bg-white border-t border-red-200">
-                      <div className="min-w-0">
-                        <p className="text-[10px] font-black text-red-800 truncate">
-                          🏪 {supermarket.storeName} ➔ 🌱 {farmHouse.label}
-                        </p>
-                        <p className="text-[9px] text-neutral-500 truncate">
-                          {farmHouse.address || farmHouse.label}
-                        </p>
-                      </div>
-                      <span className="flex-shrink-0 text-[10px] font-extrabold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-lg">
-                        {routeStats
-                          ? `${routeStats.km} km • ${routeStats.durationText}`
-                          : `~${straightLineKm} km`}
-                      </span>
-                    </div>
                   </div>
                 )}
 
@@ -393,7 +391,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       {(order.status === 'picked_up' || order.status === 'ready_for_pickup_delivery' || order.status === 'in_transit') && (
                         <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-900 bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-xl">
                           <Truck className="w-3.5 h-3.5 text-emerald-600 animate-pulse flex-shrink-0" />
-                          <span>Hauler Assigned ({order.transporterName || 'Tricycle Hauler'}) — Hauler will mark delivered</span>
+                          <span>Hauler will mark delivered</span>
                         </div>
                       )}
                       {order.status === 'completed' && (

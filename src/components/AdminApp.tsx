@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Shield,
   Users,
@@ -229,6 +229,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     variety?: string;
     isOrganic?: boolean;
     farmingMethod?: string;
+    supermarketStockQty?: number;
+    supermarketPrice?: number;
+    isInSupermarketStock?: boolean;
+    isPurchased?: boolean;
+    isDelivered?: boolean;
     supermarketItem?: ProduceItem;
     originalProduceItem?: ProduceItem;
   } | null>(null);
@@ -834,10 +839,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         p.sellerStoreName === 'VeggieConnect Supermarket' ||
         p.sellerStatus === 'bought_and_stocked' ||
         p.farmName === 'VeggieConnect Supermarket' ||
+        p.farmerName === 'VeggieConnect Central Produce Hub' ||
         p.id.startsWith('sm-')
       ) {
         const smKey = `sm-stocked-${p.id}`;
-        const alreadyInList = list.some((it) => isMatchingCrop(it.name, p.name));
+        const alreadyInList = list.some(
+          (it) =>
+            isMatchingCrop(it.name, p.name) ||
+            (it.produceId && (it.produceId === p.id || p.id === `sm-${it.produceId}` || p.id.startsWith(`sm-${it.produceId}`))) ||
+            (it.id && (it.id === p.id || `sm-${it.id}` === p.id))
+        );
         if (!alreadyInList && !seenKeys.has(smKey)) {
           seenKeys.add(smKey);
           const cost = p.farmgateAskingPrice || Math.round(p.pricePerUnit * 0.75);
@@ -878,10 +889,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     const mergedList: typeof list = [];
     for (const item of list) {
       const existing = mergedList.find((m) => {
+        // Same crop if the produce listing IDs match OR the names describe the same
+        // crop — a farmer often re-lists the same crop between procurements, giving
+        // the two lots different produceIds, and those must still become ONE card.
         const sameProduct =
-          m.produceId && item.produceId
-            ? m.produceId === item.produceId
-            : isMatchingCrop(m.name, item.name);
+          Boolean(m.produceId && item.produceId && m.produceId === item.produceId) ||
+          isMatchingCrop(m.name, item.name);
         if (!sameProduct) return false;
         if (m.farmerId && item.farmerId) return m.farmerId === item.farmerId;
         return (
@@ -941,6 +954,86 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     return mergedList;
   }, [orders, produceList, transportJobs]);
 
+  // Canonical per-lot "Ready to Put in Stock" pool quantity, keyed by lot id.
+  // Units already consumed (still on the live shelf + sold to buyers) are attributed
+  // to lots oldest-first (FIFO), so the per-card pools here always SUM to the
+  // crop-level pool shown on the Live Supermarket Stock card.
+  const lotReadyPoolById = useMemo(() => {
+    const result: Record<string, number> = {};
+
+    // Buyer retail orders that consumed supermarket stock (exclude admin procurements)
+    const buyerOrderItems = orders
+      .filter(
+        (o) =>
+          o.buyerId !== 'admin-main' &&
+          !o.id.startsWith('TX-ADM-') &&
+          o.status !== 'cancelled'
+      )
+      .flatMap((o) => o.items || []);
+
+    // Live shelf records for the supermarket
+    const shelfRecords = produceList.filter(
+      (p) =>
+        p.sellerStoreName === 'VeggieConnect Supermarket' ||
+        p.sellerStatus === 'bought_and_stocked' ||
+        p.farmName === 'VeggieConnect Supermarket' ||
+        p.farmerName === 'VeggieConnect Central Produce Hub' ||
+        p.id.startsWith('sm-')
+    );
+
+    // Group procured lots by crop (skip sm-stocked mirror entries when real lots exist).
+    // NOTE: plain objects used here — `Map` is shadowed by the Google Maps component import.
+    const lotsByCrop: Record<string, { name: string; lots: typeof ownedBoughtProducts }> = {};
+    ownedBoughtProducts.forEach((lot) => {
+      if (!lot.isPurchased) return;
+      const key = `$${normalizeCropName(lot.name)}`; // `$` prefix avoids Object.prototype name collisions
+      if (key === '$') return;
+      const entry = lotsByCrop[key] || { name: lot.name, lots: [] as typeof ownedBoughtProducts };
+      entry.lots.push(lot);
+      lotsByCrop[key] = entry;
+    });
+
+    Object.values(lotsByCrop).forEach(({ name, lots }) => {
+      const hasRealLots = lots.some(
+        (it) => it.id.startsWith('order-') || it.id.startsWith('prod-bought-') || Boolean(it.orderId)
+      );
+      const activeLots = hasRealLots
+        ? lots.filter((it) => !it.id.startsWith('sm-stocked-'))
+        : lots;
+
+      // Same crop matching used by getProductStockPool so both tabs always agree
+      // (by name, or by any produce id that can represent this crop)
+      const cropIds = new Set<string>();
+      activeLots.forEach((it) => {
+        if (it.produceId) {
+          cropIds.add(it.produceId);
+          cropIds.add(`sm-${it.produceId}`);
+        }
+        cropIds.add(it.id);
+      });
+      const sold = buyerOrderItems
+        .filter(
+          (it) => isMatchingCrop(it.produceName, name) || (it.produceId && cropIds.has(it.produceId))
+        )
+        .reduce((sum, it) => sum + (it.quantity || 0), 0);
+      const shelved = shelfRecords
+        .filter((sp) => isMatchingCrop(sp.name, name) || cropIds.has(sp.id))
+        .reduce((sum, sp) => sum + (sp.stockQuantity || 0), 0);
+
+      // Everything bought for this crop that is either still shelved or already sold
+      let consumedLeft = sold + shelved;
+      [...activeLots]
+        .sort((a, b) => new Date(a.dateBought).getTime() - new Date(b.dateBought).getTime())
+        .forEach((lot) => {
+          const consumedByLot = Math.min(lot.quantityBought, Math.max(0, consumedLeft));
+          consumedLeft -= consumedByLot;
+          result[lot.id] = Math.max(0, lot.quantityBought - consumedByLot);
+        });
+    });
+
+    return result;
+  }, [ownedBoughtProducts, produceList, orders, isMatchingCrop]);
+
   // Supermarket Store Stock Products (Active live items in store for buyers)
   const supermarketStoreProducts = useMemo(() => {
     return produceList.filter(
@@ -953,14 +1046,101 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     );
   }, [produceList]);
 
+  // Helper to query the "Ready to Put in Stock" pool for any given supermarket produce item
+  const getProductStockPool = useCallback(
+    (p: ProduceItem) => {
+      // 1. Find matching owned/bought items (purchased from farmer & delivered/procured to hub)
+      const matchingBoughtItems = ownedBoughtProducts.filter((item) => {
+        if (!item.isPurchased) return false;
+        const idMatch =
+          (item.produceId &&
+            (item.produceId === p.id ||
+              `sm-${item.produceId}` === p.id ||
+              p.id.startsWith(`sm-${item.produceId}`))) ||
+          (item.id && (item.id === p.id || `sm-${item.id}` === p.id));
+        if (idMatch) return true;
+        return isMatchingCrop(item.name, p.name);
+      });
+
+      // Avoid double-counting: if genuine procurement lots exist (from orders or farmer bought lots),
+      // ignore fallback sm-stocked entries which only mirror this live item itself
+      const hasRealLots = matchingBoughtItems.some(
+        (it) => it.id.startsWith('order-') || it.id.startsWith('prod-bought-') || Boolean(it.orderId)
+      );
+      const activeMatchingLots = hasRealLots
+        ? matchingBoughtItems.filter((it) => !it.id.startsWith('sm-stocked-'))
+        : matchingBoughtItems;
+
+      // 2. Sum of total bought units from all matching procurement lots
+      const totalBoughtDelivered = activeMatchingLots.reduce(
+        (sum, item) => sum + (item.quantityBought || 0),
+        0
+      );
+
+      // If genuine procurement lots exist, the total pool quantity is strictly the quantity from those lots.
+      // Only fall back to p.boughtQuantity if no procurement lots were ever found.
+      const totalPoolQty = hasRealLots
+        ? totalBoughtDelivered
+        : (p.boughtQuantity || p.stockQuantity || 0);
+
+      // 3. Retail units sold to buyers from this crop
+      const unitsSoldToBuyers = orders
+        .filter(
+          (o) =>
+            o.buyerId !== 'admin-main' &&
+            !o.id.startsWith('TX-ADM-') &&
+            o.status !== 'cancelled'
+        )
+        .reduce((sum, o) => {
+          const matchedItems = (o.items || []).filter(
+            (it) => it.produceId === p.id || (p.name && isMatchingCrop(it.produceName, p.name))
+          );
+          return sum + matchedItems.reduce((s, it) => s + (it.quantity || 0), 0);
+        }, 0);
+
+      // 4. Effective total owned remaining in admin possession
+      const effectiveTotalOwned = Math.max(0, totalPoolQty - unitsSoldToBuyers);
+
+      // 5. Current stock placed on the live supermarket shelf — summed across ALL
+      // live records for this crop (duplicated shelf records would otherwise make
+      // the Live pool disagree with the "Ready to Put in Stock" cards)
+      const currentLiveStock = produceList
+        .filter(
+          (sp) =>
+            (sp.sellerStoreName === 'VeggieConnect Supermarket' ||
+              sp.sellerStatus === 'bought_and_stocked' ||
+              sp.farmName === 'VeggieConnect Supermarket' ||
+              sp.farmerName === 'VeggieConnect Central Produce Hub' ||
+              sp.id.startsWith('sm-')) &&
+            (sp.id === p.id || isMatchingCrop(sp.name, p.name))
+        )
+        .reduce((sum, sp) => sum + (sp.stockQuantity || 0), 0);
+
+      // 6. Available remaining units in the "Ready to Put in Stock" pool
+      const availableInPool = Math.max(0, effectiveTotalOwned - currentLiveStock);
+
+      return {
+        totalPoolQty,
+        unitsSoldToBuyers,
+        effectiveTotalOwned,
+        currentLiveStock,
+        availableInPool,
+        matchingBoughtItems: activeMatchingLots,
+      };
+    },
+    [ownedBoughtProducts, produceList, orders, isMatchingCrop]
+  );
+
   // Filtered Owned/Bought Products for Stocks Tab
   const filteredOwnedBought = useMemo(() => {
     return ownedBoughtProducts.filter((item) => {
-      // Status Filter — a lot is shelvable only when bought AND delivered AND not yet shelved.
-      // Pending or in-transit procurements never count as "Ready to Put in Stock".
-      const isShelvable = item.isPurchased && item.isDelivered && !item.isInSupermarketStock;
-      if (stocksFilter === 'ready_to_stock' && !isShelvable) return false;
-      if (stocksFilter === 'already_stocked' && !item.isInSupermarketStock) return false;
+      // Status Filter — a lot has ready stock if bought AND delivered AND remaining pool > 0.
+      const readyToStockQty = lotReadyPoolById[item.id] ?? Math.max(0, item.quantityBought - (item.supermarketStockQty || 0));
+      const hasReadyStock = item.isPurchased && item.isDelivered && readyToStockQty > 0;
+      const isAlreadyStocked = (item.supermarketStockQty || 0) > 0;
+
+      if (stocksFilter === 'ready_to_stock' && !hasReadyStock) return false;
+      if (stocksFilter === 'already_stocked' && !isAlreadyStocked) return false;
 
       if (!stocksSearch.trim()) return true;
       const q = stocksSearch.toLowerCase();
@@ -973,7 +1153,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         (item.category || '').toLowerCase().includes(q)
       );
     });
-  }, [ownedBoughtProducts, stocksSearch, stocksFilter]);
+  }, [ownedBoughtProducts, lotReadyPoolById, stocksSearch, stocksFilter]);
 
   // Filtered Supermarket Store Products
   const filteredSupermarketStore = useMemo(() => {
@@ -990,7 +1170,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   }, [supermarketStoreProducts, stocksSearch]);
 
   const unstockedBoughtCount = useMemo(() => {
-    return ownedBoughtProducts.filter((it) => it.isPurchased && it.isDelivered && !it.isInSupermarketStock).length;
+    return ownedBoughtProducts.filter(
+      (it) =>
+        it.isPurchased &&
+        it.isDelivered &&
+        (lotReadyPoolById[it.id] ?? Math.max(0, it.quantityBought - (it.supermarketStockQty || 0))) > 0
+    ).length;
+  }, [ownedBoughtProducts, lotReadyPoolById]);
+
+  const alreadyStockedBoughtCount = useMemo(() => {
+    return ownedBoughtProducts.filter((it) => (it.supermarketStockQty || 0) > 0).length;
   }, [ownedBoughtProducts]);
 
   // Combined Transactions (Orders enriched with matching Transport Jobs and Transporters)
@@ -1136,15 +1325,64 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const handleSaveProduceEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingProduceItem) return;
-    onUpdateProduce(editingProduceItem);
-    appSync.publish('PRODUCE_UPDATED', editingProduceItem, 'admin');
-    showToast(`Saved ${editingProduceItem.name}`);
+
+    const isSupermarketItem =
+      editingProduceItem.sellerStoreName === 'VeggieConnect Supermarket' ||
+      editingProduceItem.id.startsWith('sm-') ||
+      editingProduceItem.sellerStatus === 'bought_and_stocked' ||
+      editingProduceItem.farmName === 'VeggieConnect Supermarket' ||
+      editingProduceItem.farmerName === 'VeggieConnect Central Produce Hub';
+
+    const origItem = produceList.find((p) => p.id === editingProduceItem.id);
+    const origLiveStock = origItem ? origItem.stockQuantity : 0;
+    const poolInfo = getProductStockPool(origItem || editingProduceItem);
+
+    if (isSupermarketItem) {
+      const maxAllowed = Math.min(
+        poolInfo.effectiveTotalOwned || origLiveStock,
+        origLiveStock + poolInfo.availableInPool
+      );
+
+      if (editingProduceItem.stockQuantity > maxAllowed) {
+        showToast(
+          `⚠️ Cannot set stock to ${editingProduceItem.stockQuantity} ${editingProduceItem.unit}s: Exceeds owned inventory! You only have ${maxAllowed} ${editingProduceItem.unit}s total (${poolInfo.availableInPool} ${editingProduceItem.unit}s remaining in pool).`
+        );
+        return;
+      }
+    }
+
+    const totalOwned = isSupermarketItem
+      ? Math.max(editingProduceItem.boughtQuantity || 0, poolInfo.totalPoolQty)
+      : editingProduceItem.boughtQuantity;
+
+    const finalizedItem: ProduceItem = {
+      ...editingProduceItem,
+      boughtQuantity: totalOwned,
+      sellerStatus: editingProduceItem.stockQuantity > 0 ? (isSupermarketItem ? 'bought_and_stocked' : editingProduceItem.sellerStatus) : (isSupermarketItem ? 'bought_and_stocked' : 'sold_out'),
+    };
+
+    onUpdateProduce(finalizedItem);
+    appSync.publish('PRODUCE_UPDATED', finalizedItem, 'admin');
+
+    fetch(`/api/products/${finalizedItem.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(finalizedItem),
+    }).catch((e) => console.log('Produce edit sync notice:', e));
+
+    showToast(`Saved ${finalizedItem.name}`);
     setEditingProduceItem(null);
   };
 
   // Stocks Management Actions (Put in Supermarket Stock, Adjust Quantity, Edit Price)
   const handleOpenPutInStockModal = (item: any) => {
-    const defaultQty = item.quantityBought || 10;
+    const remainingToStock =
+      lotReadyPoolById[item.id] ?? Math.max(0, item.quantityBought - (item.supermarketStockQty || 0));
+    if (remainingToStock <= 0) {
+      showToast(`⚠️ All ${item.quantityBought} ${item.unit}s of ${item.name} are already on the store shelf!`);
+      return;
+    }
+    const defaultQty = remainingToStock;
     const askingPrice = item.costPricePerUnit || 40;
 
     // Check if DA SRP is available for this crop
@@ -1168,7 +1406,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const handleConfirmPutInSupermarketStock = () => {
     if (!puttingInStockItem) return;
 
-    const qty = Math.max(1, stockModalQty);
+    const remainingInLot =
+      lotReadyPoolById[puttingInStockItem.id] ??
+      Math.max(0, puttingInStockItem.quantityBought - (puttingInStockItem.supermarketStockQty || 0));
+    if (remainingInLot <= 0) {
+      showToast('⚠️ No remaining stock available in this lot to put in supermarket!');
+      setPuttingInStockItem(null);
+      return;
+    }
+    const qtyToAdd = Math.min(Math.max(1, stockModalQty), remainingInLot);
     const price = Math.max(1, stockModalPrice);
     const cropName = puttingInStockItem.name;
     const cropUnit = puttingInStockItem.unit || 'kg';
@@ -1181,11 +1427,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         (isMatchingCrop(p.name, cropName) || (prodId && (p.id === prodId || p.id === `sm-${prodId}` || p.id.startsWith(`sm-${prodId}`))))
     );
 
+    const prevLiveStock = existingSm ? existingSm.stockQuantity : 0;
+    const newLiveStock = prevLiveStock + qtyToAdd;
+    const totalOwnedQuantity = Math.max(existingSm?.boughtQuantity || 0, puttingInStockItem.quantityBought);
+
     const resultingItem: ProduceItem = existingSm
       ? {
           ...existingSm,
           name: cropName,
-          stockQuantity: qty,
+          stockQuantity: newLiveStock,
           pricePerUnit: price,
           category: stockModalCategory || existingSm.category || 'Vegetables',
           variety: puttingInStockItem.variety || existingSm.variety || 'Farmgate Premium',
@@ -1200,7 +1450,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           farmerId: 'admin-main',
           location: 'Dumaguete City Proper (Central Produce Hub)',
           distanceKm: 1.0,
-          boughtQuantity: Math.max(existingSm.boughtQuantity || 0, qty),
+          boughtQuantity: totalOwnedQuantity,
           boughtAt: new Date().toISOString(),
           sourcingRegion: puttingInStockItem.farmerName
             ? `${puttingInStockItem.farmerName} (${puttingInStockItem.farmName || 'Local Farm'})`
@@ -1216,7 +1466,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           variety: puttingInStockItem.variety || 'Farmgate Premium',
           pricePerUnit: price,
           unit: cropUnit,
-          stockQuantity: qty,
+          stockQuantity: newLiveStock,
           minOrderQuantity: 1,
           harvestStatus: 'Harvested Today',
           harvestDate: 'Delivered & Stocked Today',
@@ -1234,7 +1484,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           brokerStatus: 'approved_active',
           sellerStoreName: 'VeggieConnect Supermarket',
           farmgateAskingPrice: puttingInStockItem.costPricePerUnit,
-          boughtQuantity: qty,
+          boughtQuantity: totalOwnedQuantity,
           boughtAt: new Date().toISOString(),
           sourcingRegion: puttingInStockItem.farmerName
             ? `${puttingInStockItem.farmerName} (${puttingInStockItem.farmName || 'Local Farm'})`
@@ -1246,7 +1496,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         name: cropName,
         produceId: puttingInStockItem.produceId,
         orderId: puttingInStockItem.orderId,
-        stockQuantity: qty,
+        stockQuantity: newLiveStock,
+        boughtQuantity: totalOwnedQuantity,
         pricePerUnit: price,
         category: stockModalCategory,
         unit: cropUnit,
@@ -1284,7 +1535,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         name: cropName,
         orderId: puttingInStockItem.orderId,
         produceId: puttingInStockItem.produceId,
-        stockedQuantity: qty,
+        stockedQuantity: newLiveStock,
         resalePrice: price,
         costPrice: puttingInStockItem.costPricePerUnit,
         stockedAt: new Date().toISOString(),
@@ -1308,32 +1559,89 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setStocksSearch('');
 
     showToast(
-      `✓ "${cropName}" is now LIVE in Supermarket Stock! (${qty} ${cropUnit} @ ₱${price}/${cropUnit})`
+      `✓ Added ${qtyToAdd} ${cropUnit}s to Live Supermarket Stock! (Shelf: ${newLiveStock} ${cropUnit}s @ ₱${price}/${cropUnit})`
     );
   };
 
   const handleQuickStockAdjust = (produce: ProduceItem, delta: number) => {
-    const newQty = Math.max(0, produce.stockQuantity + delta);
-    const updated: ProduceItem = {
-      ...produce,
-      stockQuantity: newQty,
-    };
-    onUpdateProduce(updated);
-    appSync.publish('PRODUCE_UPDATED', updated, 'admin');
+    const poolInfo = getProductStockPool(produce);
 
-    fetch(`/api/products/${produce.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stockQuantity: newQty }),
-    }).catch((e) => console.log('Supermarket stock notice:', e));
+    if (delta > 0) {
+      if (poolInfo.availableInPool <= 0) {
+        showToast(
+          `⚠️ Insufficient inventory: 0 ${produce.unit}s remaining in "Ready to Put in Stock" pool! Procure more from farmers to add live stock.`
+        );
+        return;
+      }
 
-    showToast(`Updated ${produce.name} stock to ${newQty} ${produce.unit}s`);
+      const allowedDelta = Math.min(delta, poolInfo.availableInPool);
+      const newQty = produce.stockQuantity + allowedDelta;
+      const totalOwned = Math.max(produce.boughtQuantity || 0, poolInfo.totalPoolQty);
+
+      const updated: ProduceItem = {
+        ...produce,
+        stockQuantity: newQty,
+        boughtQuantity: totalOwned,
+        sellerStatus: newQty > 0 ? 'bought_and_stocked' : produce.sellerStatus,
+      };
+
+      onUpdateProduce(updated);
+      appSync.publish('PRODUCE_UPDATED', updated, 'admin');
+
+      fetch(`/api/products/${produce.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stockQuantity: newQty, boughtQuantity: totalOwned }),
+      }).catch((e) => console.log('Supermarket stock notice:', e));
+
+      const poolRemainingAfter = poolInfo.availableInPool - allowedDelta;
+      showToast(
+        `✓ Pulled ${allowedDelta} ${produce.unit}s from pool into Live Stock. (${poolRemainingAfter} ${produce.unit}s remaining in pool)`
+      );
+    } else if (delta < 0) {
+      if (produce.stockQuantity <= 0) {
+        showToast(`⚠️ ${produce.name} live stock is already at 0 ${produce.unit}s.`);
+        return;
+      }
+
+      const returnQty = Math.min(produce.stockQuantity, Math.abs(delta));
+      const newQty = produce.stockQuantity - returnQty;
+      const totalOwned = Math.max(produce.boughtQuantity || 0, poolInfo.totalPoolQty);
+
+      const updated: ProduceItem = {
+        ...produce,
+        stockQuantity: newQty,
+        boughtQuantity: totalOwned,
+        sellerStatus: newQty === 0 ? 'bought_and_stocked' : produce.sellerStatus,
+      };
+
+      onUpdateProduce(updated);
+      appSync.publish('PRODUCE_UPDATED', updated, 'admin');
+
+      fetch(`/api/products/${produce.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stockQuantity: newQty, boughtQuantity: totalOwned }),
+      }).catch((e) => console.log('Supermarket stock notice:', e));
+
+      const poolAfter = poolInfo.availableInPool + returnQty;
+      showToast(
+        `✓ Returned ${returnQty} ${produce.unit}s back into "Ready to Put in Stock" pool. (${poolAfter} ${produce.unit}s now in pool)`
+      );
+    }
   };
 
   const handleRemoveFromSupermarketStock = (produce: ProduceItem) => {
+    const returnedQty = produce.stockQuantity;
     onDeleteProduce(produce.id);
     appSync.publish('PRODUCE_UPDATED', { type: 'DELETED', id: produce.id }, 'admin');
-    showToast(`Removed "${produce.name}" from Supermarket Store shelf.`);
+    if (returnedQty > 0) {
+      showToast(
+        `Removed "${produce.name}" from store shelf. ${returnedQty} ${produce.unit}s returned to Ready to Put in Stock pool.`
+      );
+    } else {
+      showToast(`Removed "${produce.name}" from Supermarket Store shelf.`);
+    }
   };
 
   // Owner Live Transport Actions
@@ -2306,7 +2614,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
                           }`}
                         >
-                          Already on Store Shelf ({ownedBoughtProducts.length - unstockedBoughtCount})
+                          Already on Store Shelf ({alreadyStockedBoughtCount})
                         </button>
                       </div>
 
@@ -2334,9 +2642,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       ) : (
                         <div className="space-y-2.5">
                           {filteredOwnedBought.map((item) => {
-                            const isStocked = item.isInSupermarketStock;
-                            // Only bought AND delivered lots physically exist in hand and may be shelved.
-                            const canShelve = !isStocked && item.isPurchased && item.isDelivered;
+                            const isStocked = (item.supermarketStockQty || 0) > 0;
+                            const readyQty =
+                              lotReadyPoolById[item.id] ??
+                              Math.max(0, item.quantityBought - (item.supermarketStockQty || 0));
+                            const isDeliveredAndPurchased = item.isPurchased && item.isDelivered;
+                            const canShelve = isDeliveredAndPurchased && readyQty > 0;
+                            const isFullyStocked = isDeliveredAndPurchased && isStocked && readyQty === 0;
+                            const isPartiallyStocked = isDeliveredAndPurchased && isStocked && readyQty > 0;
+
                             return (
                               <div
                                 key={item.id}
@@ -2364,17 +2678,28 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                     )}
                                   </span>
 
-                                  {isStocked ? (
+                                  {isFullyStocked ? (
                                     <span className="bg-emerald-50 text-emerald-800 border border-emerald-300 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] flex items-center gap-1 shadow-2xs">
                                       <Store className="w-3.5 h-3.5 text-emerald-600" />
                                       <span>
-                                        In Live Supermarket Stock: {item.supermarketStockQty} {item.unit}s @ ₱{item.supermarketPrice}/{item.unit} ✓
+                                        100% on Store Shelf: {item.supermarketStockQty} {item.unit}s @ ₱{item.supermarketPrice}/{item.unit} ✓
                                       </span>
                                     </span>
-                                  ) : item.isPurchased && item.isDelivered ? (
+                                  ) : isPartiallyStocked ? (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold px-2.5 py-0.5 rounded-full text-[10px] flex items-center gap-1 shadow-2xs">
+                                        <Store className="w-3.5 h-3.5 text-emerald-600" />
+                                        <span>On Shelf: {item.supermarketStockQty} {item.unit}s</span>
+                                      </span>
+                                      <span className="bg-amber-50 text-amber-900 border border-amber-200 font-extrabold px-2 py-0.5 rounded-full text-[10px] flex items-center gap-1">
+                                        <AlertCircle className="w-3 h-3 text-amber-600" />
+                                        <span>Ready in Pool: {readyQty} {item.unit}s</span>
+                                      </span>
+                                    </div>
+                                  ) : isDeliveredAndPurchased && readyQty > 0 ? (
                                     <span className="bg-amber-50 text-amber-900 border border-amber-200 font-bold px-2 py-0.5 rounded-full text-[10px] flex items-center gap-1">
                                       <AlertCircle className="w-3 h-3 text-amber-600" />
-                                      <span>Ready to Put in Stock</span>
+                                      <span>Ready to Put in Stock ({readyQty} {item.unit}s)</span>
                                     </span>
                                   ) : (
                                     <span className="bg-neutral-100 text-neutral-500 border border-neutral-200 font-bold px-2 py-0.5 rounded-full text-[10px] flex items-center gap-1">
@@ -2397,9 +2722,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   </div>
 
                                   <div className="text-right flex-shrink-0">
-                                    <span className="text-[10px] text-neutral-500 block uppercase font-bold">Quantity Owned:</span>
+                                    <span className="text-[10px] text-neutral-500 block uppercase font-bold">Total Owned:</span>
                                     <span className="text-sm font-extrabold text-neutral-900">
                                       {item.quantityBought} {item.unit}s
+                                    </span>
+                                    <span className="text-[10px] text-neutral-500 block mt-0.5">
+                                      Pool: <strong className="text-amber-800">{readyQty} {item.unit}s</strong> | Shelf: <strong className="text-emerald-700">{item.supermarketStockQty || 0} {item.unit}s</strong>
                                     </span>
                                   </div>
                                 </div>
@@ -2431,23 +2759,37 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   <span>{new Date(item.dateBought).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                                 </div>
 
-                                {/* Primary Action: Put in Supermarket Store Stock Button.
-                                    Enabled only when the lot is bought AND delivered (physically in hand) —
-                                    unlocks after "Confirm Delivery & Stock Received". */}
+                                {/* Primary Action: Put in Supermarket Store Stock Button */}
                                 <div className="pt-1">
                                   {canShelve ? (
                                     <div className="space-y-1.5">
                                       <button
                                         id={`btn-stock-${item.id}`}
                                         onClick={() => handleOpenPutInStockModal(item)}
-                                        title="Put this bought lot on the supermarket shelf"
+                                        title="Put units from this bought lot on the supermarket shelf"
                                         className="w-full py-2.5 px-3 text-white text-xs font-black rounded-xl shadow-xs flex items-center justify-center gap-2 transition-all active:scale-95 bg-emerald-600 hover:bg-emerald-700 cursor-pointer"
                                       >
                                         <Store className="w-4 h-4" />
-                                        <span>Put in Supermarket Store Stock</span>
+                                        <span>
+                                          {isStocked
+                                            ? `Put More in Stock (${readyQty} ${item.unit}s remaining in pool)`
+                                            : `Put in Supermarket Store Stock (${readyQty} ${item.unit}s)`}
+                                        </span>
                                       </button>
                                     </div>
-                                  ) : !isStocked ? (
+                                  ) : isFullyStocked ? (
+                                    <button
+                                      id={`btn-view-shelf-${item.id}`}
+                                      onClick={() => {
+                                        setStocksSubTab('supermarket_shelf');
+                                        setStocksSearch('');
+                                      }}
+                                      className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+                                    >
+                                      <Store className="w-3.5 h-3.5" />
+                                      <span>View in Live Supermarket Stock (100% Stocked) →</span>
+                                    </button>
+                                  ) : (
                                     <div className="space-y-1.5">
                                       <button
                                         id={`btn-stock-${item.id}`}
@@ -2473,18 +2815,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                         )}
                                       </p>
                                     </div>
-                                  ) : (
-                                    <button
-                                      id={`btn-view-shelf-${item.id}`}
-                                      onClick={() => {
-                                        setStocksSubTab('supermarket_shelf');
-                                        setStocksSearch('');
-                                      }}
-                                      className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
-                                    >
-                                      <Store className="w-3.5 h-3.5" />
-                                      <span>View in Live Supermarket Stock →</span>
-                                    </button>
                                   )}
                                 </div>
                               </div>
@@ -2499,7 +2829,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-xs text-emerald-950 flex items-start gap-2">
                         <Store className="w-4 h-4 text-emerald-700 flex-shrink-0 mt-0.5" />
                         <p className="leading-relaxed text-[11px]">
-                          <strong>Live Supermarket Shelves:</strong> These crops are actively displayed to registered buyers in the VeggieConnect Market app. Orders are fulfilled directly from your Central Supermarket Hub.
+                          <strong>Live Supermarket Shelves:</strong> These crops are actively displayed to registered buyers in the VeggieConnect Market app. Orders are fulfilled directly from your Central Supermarket Hub. Adding live stock strictly pulls units from your "Ready to Put in Stock" pool.
                         </p>
                       </div>
 
@@ -2521,6 +2851,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         <div className="space-y-2.5">
                           {filteredSupermarketStore.map((p) => {
                             const isOutOfStock = p.stockQuantity === 0;
+                            const poolInfo = getProductStockPool(p);
+
                             return (
                               <div
                                 key={p.id}
@@ -2549,37 +2881,75 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   </div>
                                 </div>
 
-                                {/* Stock Quantity Bar */}
-                                <div className="bg-neutral-50 p-2.5 rounded-2xl flex items-center justify-between text-[11px] border border-neutral-150">
-                                  <div className="flex items-center gap-2">
-                                    <span>Store Shelf Inventory:</span>
-                                    {isOutOfStock ? (
-                                      <span className="font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 text-[10px]">
-                                        Out of Stock (0 {p.unit}s)
-                                      </span>
-                                    ) : (
-                                      <span className="font-bold text-neutral-900 bg-white px-2 py-0.5 rounded border border-neutral-200">
-                                        {p.stockQuantity} {p.unit}s available
-                                      </span>
-                                    )}
+                                {/* Stock Quantity & Pool Inventory Bar */}
+                                <div className="bg-neutral-50 p-2.5 rounded-2xl space-y-2 text-[11px] border border-neutral-150">
+                                  <div className="flex items-center justify-between gap-1 flex-wrap">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-neutral-600 font-medium">Store Shelf Inventory:</span>
+                                      {isOutOfStock ? (
+                                        <span className="font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 text-[10px]">
+                                          Out of Stock (0 {p.unit}s)
+                                        </span>
+                                      ) : (
+                                        <span className="font-bold text-neutral-900 bg-white px-2 py-0.5 rounded border border-neutral-200">
+                                          {p.stockQuantity} {p.unit}s available
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Quick +/- Stock Buttons (Strictly -1 and +1) */}
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        onClick={() => handleQuickStockAdjust(p, -1)}
+                                        disabled={p.stockQuantity <= 0}
+                                        className={`px-2 h-6.5 rounded-lg text-xs font-bold flex items-center justify-center transition-all ${
+                                          p.stockQuantity <= 0
+                                            ? 'opacity-30 cursor-not-allowed bg-neutral-150 text-neutral-400'
+                                            : 'bg-neutral-200 hover:bg-neutral-300 text-neutral-700 cursor-pointer active:scale-90 shadow-2xs'
+                                        }`}
+                                        title={
+                                          p.stockQuantity <= 0
+                                            ? 'Live shelf stock is 0'
+                                            : `Return 1 unit back into Ready to Put in Stock pool`
+                                        }
+                                      >
+                                        -1
+                                      </button>
+                                      <button
+                                        onClick={() => handleQuickStockAdjust(p, 1)}
+                                        disabled={poolInfo.availableInPool <= 0}
+                                        className={`px-2 h-6.5 rounded-lg text-xs font-bold flex items-center justify-center transition-all ${
+                                          poolInfo.availableInPool <= 0
+                                            ? 'opacity-30 cursor-not-allowed bg-neutral-150 text-neutral-400'
+                                            : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-90 shadow-2xs'
+                                        }`}
+                                        title={
+                                          poolInfo.availableInPool <= 0
+                                            ? `Cannot add stock: 0 units remaining in Ready to Put in Stock pool`
+                                            : `Pull 1 unit from Ready to Put in Stock pool (${poolInfo.availableInPool} available)`
+                                        }
+                                      >
+                                        +1
+                                      </button>
+                                    </div>
                                   </div>
 
-                                  {/* Quick +/- Stock Buttons */}
-                                  <div className="flex items-center gap-1">
-                                    <button
-                                      onClick={() => handleQuickStockAdjust(p, -5)}
-                                      className="w-6 h-6 rounded-lg bg-neutral-200 hover:bg-neutral-300 text-neutral-700 font-bold flex items-center justify-center text-xs cursor-pointer active:scale-90"
-                                      title="Subtract 5 units"
-                                    >
-                                      -5
-                                    </button>
-                                    <button
-                                      onClick={() => handleQuickStockAdjust(p, 5)}
-                                      className="w-6 h-6 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold flex items-center justify-center text-xs cursor-pointer active:scale-90"
-                                      title="Add 5 units"
-                                    >
-                                      +5
-                                    </button>
+                                  {/* Ready to Put in Stock Pool Row */}
+                                  <div className="flex items-center justify-between pt-1 border-t border-neutral-200/70 text-[10px]">
+                                    <div className="flex items-center gap-1">
+                                      <PackageCheck className="w-3 h-3 text-emerald-600" />
+                                      <span className="text-neutral-500 font-semibold">Ready to Put in Stock Pool:</span>
+                                    </div>
+                                    {poolInfo.availableInPool > 0 ? (
+                                      <span className="font-extrabold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                        <AlertCircle className="w-2.5 h-2.5 text-amber-600" />
+                                        <span>{poolInfo.availableInPool} {p.unit}s remaining in pool</span>
+                                      </span>
+                                    ) : (
+                                      <span className="font-bold text-neutral-500 bg-neutral-100 border border-neutral-200 px-2 py-0.5 rounded-full">
+                                        0 {p.unit}s in pool (Pool Depleted)
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
 
@@ -2886,7 +3256,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       <div className="flex items-center gap-1.5 min-w-0">
                                         <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
                                         <span className="text-[11px] font-black uppercase tracking-wide truncate">
-                                          Route to {farmHouse.label}
+                                          Live Procurement Route: {farmHouse.label} ➔ {supermarket.storeName}
                                         </span>
                                       </div>
                                       <span className="text-[9px] bg-white/20 font-extrabold px-1.5 py-0.5 rounded flex-shrink-0">
@@ -2896,10 +3266,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
                                     <FarmRouteMap
                                       routeKey={job.id}
-                                      origin={supermarketHub}
-                                      destination={farmHouse.coords}
-                                      originLabel={supermarket.storeName}
-                                      destinationLabel={farmHouse.label}
+                                      origin={farmHouse.coords}
+                                      destination={supermarketHub}
+                                      originLabel={farmHouse.label}
+                                      destinationLabel={supermarket.storeName}
+                                      originEmoji="🌱"
+                                      destinationEmoji="🏪"
                                       heightClassName="h-60"
                                       onRouteCalculated={(km, durationText) => {
                                         setHaulRouteStats((prev) =>
@@ -2911,22 +3283,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                         );
                                       }}
                                     />
-
-                                    <div className="flex items-center justify-between gap-2 px-2.5 py-2 bg-white border-t border-red-200">
-                                      <div className="min-w-0">
-                                        <p className="text-[10px] font-black text-red-800 truncate">
-                                          🏪 {supermarket.storeName} ➔ 🌱 {farmHouse.label}
-                                        </p>
-                                        <p className="text-[9px] text-neutral-500 truncate">
-                                          {farmHouse.address || job.pickupLocation}
-                                        </p>
-                                      </div>
-                                      <span className="flex-shrink-0 text-[10px] font-extrabold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-lg">
-                                        {routeStats
-                                          ? `${routeStats.km} km • ${routeStats.durationText}`
-                                          : `~${straightLineKm} km`}
-                                      </span>
-                                    </div>
                                   </div>
                                 )}
 
@@ -4221,32 +4577,108 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               );
             })()}
 
-            <form onSubmit={handleSaveProduceEdit} className="space-y-3">
-              <div>
-                <label className="text-[10px] font-bold uppercase text-neutral-500">Price per Unit (₱)</label>
-                <input
-                  type="number"
-                  value={editingProduceItem.pricePerUnit}
-                  onChange={(e) => setEditingProduceItem({ ...editingProduceItem, pricePerUnit: Number(e.target.value) })}
-                  className="w-full border rounded-xl p-2 text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold uppercase text-neutral-500">Available Stock ({editingProduceItem.unit}s)</label>
-                <input
-                  type="number"
-                  value={editingProduceItem.stockQuantity}
-                  onChange={(e) => setEditingProduceItem({ ...editingProduceItem, stockQuantity: Number(e.target.value) })}
-                  className="w-full border rounded-xl p-2 text-xs"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs cursor-pointer"
-              >
-                Save Crop Updates
-              </button>
-            </form>
+            {(() => {
+              const isSm =
+                editingProduceItem.sellerStoreName === 'VeggieConnect Supermarket' ||
+                editingProduceItem.id.startsWith('sm-') ||
+                editingProduceItem.sellerStatus === 'bought_and_stocked' ||
+                editingProduceItem.farmName === 'VeggieConnect Supermarket' ||
+                editingProduceItem.farmerName === 'VeggieConnect Central Produce Hub';
+              const origItem = produceList.find((p) => p.id === editingProduceItem.id);
+              const origLiveStock = origItem ? origItem.stockQuantity : 0;
+              const pool = getProductStockPool(origItem || editingProduceItem);
+              const maxAllowed = origLiveStock + pool.availableInPool;
+              const isOverPool = isSm && editingProduceItem.stockQuantity > maxAllowed;
+
+              return (
+                <div className="space-y-3">
+                  {isSm && (
+                    <div className="bg-amber-50/80 border border-amber-200 rounded-2xl p-2.5 space-y-1 text-[11px]">
+                      <div className="flex justify-between text-neutral-600">
+                        <span>Current Live Shelf Stock:</span>
+                        <span className="font-bold text-neutral-900">{origLiveStock} {editingProduceItem.unit}s</span>
+                      </div>
+                      <div className="flex justify-between text-neutral-600">
+                        <span>Available in Owned Pool:</span>
+                        <span className="font-bold text-amber-800">{pool.availableInPool} {editingProduceItem.unit}s</span>
+                      </div>
+                      <div className="flex justify-between border-t border-amber-200/80 pt-1 text-emerald-950 font-bold">
+                        <span>Max Allowable Live Stock:</span>
+                        <span className="font-extrabold text-emerald-800">{maxAllowed} {editingProduceItem.unit}s</span>
+                      </div>
+                      {isOverPool ? (
+                        <p className="text-[10px] text-rose-600 font-bold pt-1">
+                          ⚠️ Stock exceeds available pool! Cannot add phantom inventory. Maximum allowable is {maxAllowed} {editingProduceItem.unit}s.
+                        </p>
+                      ) : pool.availableInPool <= 0 ? (
+                        <p className="text-[10px] text-amber-800 font-medium pt-1">
+                          ℹ️ Ready-to-Stock pool is depleted (0 available). You cannot add more live stock unless you buy more from farmers. Decreasing live stock will return units to the pool.
+                        </p>
+                      ) : null}
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveProduceEdit} className="space-y-3">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-neutral-500">Price per Unit (₱)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={editingProduceItem.pricePerUnit}
+                        onChange={(e) => setEditingProduceItem({ ...editingProduceItem, pricePerUnit: Number(e.target.value) })}
+                        className="w-full border rounded-xl p-2 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="text-[10px] font-bold uppercase text-neutral-500">
+                          Available Stock ({editingProduceItem.unit}s)
+                        </label>
+                        {isSm && (
+                          <span className="text-[10px] font-bold text-emerald-700">
+                            Max: {maxAllowed} {editingProduceItem.unit}s
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        type="number"
+                        min="0"
+                        max={isSm ? maxAllowed : undefined}
+                        value={editingProduceItem.stockQuantity}
+                        onChange={(e) => {
+                          const val = Math.max(0, Number(e.target.value));
+                          if (isSm && val > maxAllowed) {
+                            showToast(`⚠️ Cannot exceed owned inventory! Max allowable is ${maxAllowed} ${editingProduceItem.unit}s.`);
+                            setEditingProduceItem({ ...editingProduceItem, stockQuantity: maxAllowed });
+                          } else {
+                            setEditingProduceItem({ ...editingProduceItem, stockQuantity: val });
+                          }
+                        }}
+                        className={`w-full border rounded-xl p-2 text-xs font-mono font-bold ${
+                          isOverPool ? 'border-rose-400 bg-rose-50/50' : 'border-neutral-200'
+                        }`}
+                      />
+                      {isSm && pool.availableInPool <= 0 && (
+                        <p className="text-[10px] text-neutral-500 mt-1">
+                          To add more stock, procure from farmers in the Buy Desk.
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isOverPool}
+                      className={`w-full py-2 text-white font-bold rounded-xl text-xs transition-all ${
+                        isOverPool
+                          ? 'bg-neutral-300 text-neutral-500 cursor-not-allowed'
+                          : 'bg-emerald-600 hover:bg-emerald-700 cursor-pointer'
+                      }`}
+                    >
+                      Save Crop Updates
+                    </button>
+                  </form>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -4493,31 +4925,62 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   {puttingInStockItem.quantityBought} {puttingInStockItem.unit || 'kg'}s
                 </span>
               </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span>Currently on Live Shelf:</span>
+                <span className="font-bold text-emerald-800">
+                  {puttingInStockItem.supermarketStockQty || 0} {puttingInStockItem.unit || 'kg'}s
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] font-bold text-amber-900 bg-amber-100/60 p-1.5 rounded-lg">
+                <span>Available to Put in Stock:</span>
+                <span>
+                  {lotReadyPoolById[puttingInStockItem.id] ?? Math.max(0, puttingInStockItem.quantityBought - (puttingInStockItem.supermarketStockQty || 0))} {puttingInStockItem.unit || 'kg'}s
+                </span>
+              </div>
             </div>
 
             {/* Form Inputs */}
-            <div className="space-y-3 text-xs">
-              {/* Input 1: Stock Quantity */}
-              <div>
-                <label className="block text-[11px] font-bold text-neutral-700 mb-1">
-                  Quantity to Put into Supermarket Stock ({puttingInStockItem.unit || 'kg'})
-                </label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    min="1"
-                    value={stockModalQty}
-                    onChange={(e) => setStockModalQty(Math.max(1, parseInt(e.target.value) || 1))}
-                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 font-mono font-bold focus:outline-none focus:border-emerald-600 focus:bg-white"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 text-xs font-bold">
-                    {puttingInStockItem.unit || 'kg'}
-                  </span>
-                </div>
-                <span className="text-[10px] text-neutral-500 mt-0.5 block">
-                  Prefilled with {puttingInStockItem.quantityBought} {puttingInStockItem.unit}s bought from farmer.
-                </span>
-              </div>
+            {(() => {
+              const maxPoolAvailable = lotReadyPoolById[puttingInStockItem.id] ?? Math.max(0, puttingInStockItem.quantityBought - (puttingInStockItem.supermarketStockQty || 0));
+              const isPoolDepleted = maxPoolAvailable <= 0;
+
+              return (
+                <div className="space-y-3 text-xs">
+                  {/* Input 1: Stock Quantity */}
+                  <div>
+                    <label className="block text-[11px] font-bold text-neutral-700 mb-1">
+                      Quantity to Add from Pool to Store Shelf ({puttingInStockItem.unit || 'kg'})
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="1"
+                        max={maxPoolAvailable}
+                        disabled={isPoolDepleted}
+                        value={stockModalQty}
+                        onChange={(e) => {
+                          const entered = parseInt(e.target.value) || 0;
+                          if (entered > maxPoolAvailable) {
+                            showToast(`⚠️ Only ${maxPoolAvailable} ${puttingInStockItem.unit}s remaining in this bought lot pool!`);
+                            setStockModalQty(maxPoolAvailable);
+                          } else {
+                            setStockModalQty(Math.max(1, entered));
+                          }
+                        }}
+                        className={`w-full border rounded-xl px-3 py-2 text-xs text-neutral-900 font-mono font-bold focus:outline-none focus:border-emerald-600 ${
+                          isPoolDepleted ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed' : 'bg-neutral-50 focus:bg-white'
+                        }`}
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 text-xs font-bold">
+                        {puttingInStockItem.unit || 'kg'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-neutral-500 mt-0.5 block">
+                      {isPoolDepleted
+                        ? '⚠️ Pool depleted for this lot (0 units remaining).'
+                        : `Maximum available to put in stock: ${maxPoolAvailable} ${puttingInStockItem.unit}s`}
+                    </span>
+                  </div>
 
               {/* Input 2: Resale Retail Price */}
               <div>
@@ -4585,26 +5048,40 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 />
               </div>
             </div>
+          );
+        })()}
 
             {/* Confirmation Buttons */}
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setPuttingInStockItem(null)}
-                className="flex-1 py-2.5 px-3 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                id="btn-confirm-put-stock"
-                onClick={handleConfirmPutInSupermarketStock}
-                className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
-              >
-                <Check className="w-4 h-4" />
-                <span>Put in Supermarket Stock</span>
-              </button>
-            </div>
+            {(() => {
+              const maxPoolAvailable = lotReadyPoolById[puttingInStockItem.id] ?? Math.max(0, puttingInStockItem.quantityBought - (puttingInStockItem.supermarketStockQty || 0));
+              const isPoolDepleted = maxPoolAvailable <= 0;
+
+              return (
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setPuttingInStockItem(null)}
+                    className="flex-1 py-2.5 px-3 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-confirm-put-stock"
+                    disabled={isPoolDepleted || stockModalQty <= 0 || stockModalQty > maxPoolAvailable}
+                    onClick={handleConfirmPutInSupermarketStock}
+                    className={`flex-1 py-2.5 px-3 text-white text-xs font-black rounded-xl shadow-md flex items-center justify-center gap-1.5 transition-all ${
+                      isPoolDepleted || stockModalQty <= 0 || stockModalQty > maxPoolAvailable
+                        ? 'bg-neutral-300 text-neutral-500 cursor-not-allowed shadow-none'
+                        : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20 cursor-pointer active:scale-95'
+                    }`}
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>{isPoolDepleted ? 'Pool Depleted' : 'Put in Supermarket Stock'}</span>
+                  </button>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}

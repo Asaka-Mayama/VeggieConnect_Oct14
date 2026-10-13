@@ -186,9 +186,12 @@ const FarmRouteController: React.FC<{
       const bounds = new google.maps.LatLngBounds();
       bounds.extend({ lat: originLat, lng: originLng });
       bounds.extend({ lat: destLat, lng: destLng });
-      map.fitBounds(bounds, { top: 48, bottom: 48, left: 48, right: 48 });
+      map.fitBounds(bounds, { top: 40, bottom: 40, left: 56, right: 56 });
     } catch (e) {
-      map.panTo({ lat: destLat, lng: destLng });
+      map.panTo({
+        lat: (originLat + destLat) / 2,
+        lng: (originLng + destLng) / 2,
+      });
     }
   }, [map, originLat, originLng, destLat, destLng]);
 
@@ -268,8 +271,11 @@ export const FarmRouteMap: React.FC<FarmRouteMapProps> = ({
         <Map
           key={mapInstanceKey}
           mapId="DEMO_MAP_ID"
-          defaultCenter={{ lat: destination.lat, lng: destination.lng }}
-          defaultZoom={16}
+          defaultCenter={{
+            lat: (origin.lat + destination.lat) / 2,
+            lng: (origin.lng + destination.lng) / 2,
+          }}
+          defaultZoom={13}
           mapTypeId={mapTypeId}
           gestureHandling="greedy"
           disableDefaultUI={false}
@@ -287,27 +293,27 @@ export const FarmRouteMap: React.FC<FarmRouteMapProps> = ({
             onRouteCalculated={onRouteCalculated}
           />
 
-          {/* Supermarket hub (route origin) — marker styled exactly like Admin Profile */}
+          {/* Origin marker (Left side: e.g. Farmer 🌱) */}
           <AdvancedMarker position={{ lat: origin.lat, lng: origin.lng }} title={originLabel}>
             <div className="relative flex flex-col items-center group -translate-y-3 select-none pointer-events-none">
               <div className="w-10 h-10 rounded-2xl bg-emerald-600 border-2 border-white shadow-2xl flex items-center justify-center text-white text-lg transition-transform group-hover:scale-110">
                 {originEmoji}
               </div>
               <div className="w-4 h-2 bg-black/40 rounded-full blur-xs mt-0.5" />
-              <div className="absolute top-full mt-1 max-w-[110px] truncate bg-white/95 backdrop-blur-md px-2 py-0.5 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm">
+              <div className="absolute top-full mt-1 max-w-[120px] truncate bg-white/95 backdrop-blur-md px-2 py-0.5 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm">
                 {originLabel}
               </div>
             </div>
           </AdvancedMarker>
 
-          {/* Farmer's house (route destination) — same marker shape, red to match the route */}
+          {/* Destination marker (Right side: e.g. Admin Supermarket Hub 🏪) */}
           <AdvancedMarker position={{ lat: destination.lat, lng: destination.lng }} title={destinationLabel}>
             <div className="relative flex flex-col items-center group -translate-y-3 select-none pointer-events-none">
-              <div className="w-10 h-10 rounded-2xl bg-red-600 border-2 border-white shadow-2xl flex items-center justify-center text-white text-lg transition-transform group-hover:scale-110">
+              <div className={`w-10 h-10 rounded-2xl ${destinationEmoji === '🏪' ? 'bg-blue-700' : 'bg-red-600'} border-2 border-white shadow-2xl flex items-center justify-center text-white text-lg transition-transform group-hover:scale-110`}>
                 {destinationEmoji}
               </div>
               <div className="w-4 h-2 bg-black/40 rounded-full blur-xs mt-0.5" />
-              <div className="absolute top-full mt-1 max-w-[120px] truncate bg-white/95 backdrop-blur-md px-2 py-0.5 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm">
+              <div className="absolute top-full mt-1 max-w-[130px] truncate bg-white/95 backdrop-blur-md px-2 py-0.5 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm">
                 {destinationLabel}
               </div>
             </div>
@@ -335,18 +341,14 @@ export const FarmRouteMap: React.FC<FarmRouteMapProps> = ({
         </button>
       </div>
 
-      {/* Top-left hint pill — identical style to the Admin Profile map */}
+      {/* Top-left hint pill */}
       <div className="absolute top-3 left-3 z-20 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm pointer-events-none">
-        🏪 {originLabel} ➔ 🏠 {destinationLabel}
-      </div>
-
-      {/* Red route legend */}
-      <div className="absolute bottom-3 left-3 z-20 flex items-center gap-1.5 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-xl border border-neutral-200 text-[10px] font-bold text-neutral-800 shadow-sm pointer-events-none">
-        <span className="w-5 h-[3px] bg-red-600 rounded-full" />
-        <span className="text-red-700">Red Route to {destinationLabel}</span>
+        {originEmoji} {originLabel} ➔ {destinationEmoji} {destinationLabel}
       </div>
     </div>
   );
 };
+
+
 
 

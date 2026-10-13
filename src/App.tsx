@@ -1211,6 +1211,7 @@ export default function App() {
     description?: string;
     orderId?: string;
     produceId?: string;
+    boughtQuantity?: number;
   }) => {
     let resultingItem: ProduceItem;
 
@@ -1258,7 +1259,7 @@ export default function App() {
           latitude: hubCoords.lat,
           longitude: hubCoords.lng,
           distanceKm: 1.0,
-          boughtQuantity: Math.max(existing.boughtQuantity || 0, itemData.stockQuantity),
+          boughtQuantity: itemData.boughtQuantity || Math.max(existing.boughtQuantity || 0, itemData.stockQuantity),
           boughtAt: new Date().toISOString(),
           sourcingRegion: itemData.farmerName ? `${itemData.farmerName} (${itemData.farmName || 'Local Farm'})` : (existing.sourcingRegion || 'Local Farmer Partner'),
           description:
@@ -1305,7 +1306,7 @@ export default function App() {
           brokerStatus: 'approved_active',
           sellerStoreName: 'VeggieConnect Supermarket',
           farmgateAskingPrice: itemData.farmgateAskingPrice || Math.round(itemData.pricePerUnit * 0.75),
-          boughtQuantity: itemData.stockQuantity,
+          boughtQuantity: itemData.boughtQuantity || itemData.stockQuantity,
           boughtAt: new Date().toISOString(),
           sourcingRegion: itemData.farmerName ? `${itemData.farmerName} (${itemData.farmName || 'Local Farm'})` : 'Local Farmer Partner',
         };

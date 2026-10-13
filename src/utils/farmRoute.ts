@@ -24,9 +24,15 @@ export interface AdminLocationProfile {
 
 export const DEFAULT_SUPERMARKET: SupermarketLocation = {
   storeName: 'VeggieConnect Central Supermarket Hub',
-  address: 'Dumaguete City Proper, Negros Oriental',
-  latitude: DUMAGUETE_DEFAULT_COORDS.lat,
-  longitude: DUMAGUETE_DEFAULT_COORDS.lng,
+  address: 'Rizal Boulevard & Port Area, Dumaguete City Proper, Negros Oriental',
+  latitude: 9.3080,
+  longitude: 123.3105,
+};
+
+/** Default western agricultural foothill coordinates for farms in Negros Oriental (Left side of map) */
+export const DEFAULT_FARM_COORDINATES: Coordinates = {
+  lat: 9.2842,
+  lng: 123.2380, // Apolong / Valencia Highland Agricultural Valley (Mount Talinis foothills)
 };
 
 /**
@@ -35,6 +41,7 @@ export const DEFAULT_SUPERMARKET: SupermarketLocation = {
  */
 export function resolveSupermarketLocation(seed?: Partial<SupermarketLocation>): SupermarketLocation {
   const base: SupermarketLocation = { ...DEFAULT_SUPERMARKET, ...seed };
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return base;
   try {
     const saved = localStorage.getItem(SUPERMARKET_STORAGE_KEY);
     if (saved) {
@@ -108,17 +115,19 @@ export function getAdminProfileForLocationFallback(
     if (profile) return profile;
   }
 
-  try {
-    const savedUser = localStorage.getItem('veggieconnect_v9_clean_user');
-    if (savedUser) {
-      const parsed = JSON.parse(savedUser) as UserProfile | null;
-      if (parsed && parsed.role === 'admin') {
-        const profile = toAdminLocationProfile(parsed.location, parsed.latitude, parsed.longitude);
-        if (profile) return profile;
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      const savedUser = localStorage.getItem('veggieconnect_v9_clean_user');
+      if (savedUser) {
+        const parsed = JSON.parse(savedUser) as UserProfile | null;
+        if (parsed && parsed.role === 'admin') {
+          const profile = toAdminLocationProfile(parsed.location, parsed.latitude, parsed.longitude);
+          if (profile) return profile;
+        }
       }
+    } catch (err) {
+      console.error('Failed to read saved admin location', err);
     }
-  } catch (err) {
-    console.error('Failed to read saved admin location', err);
   }
 
   // Last resort: the admin hub record stored separately from the signed-in
@@ -140,6 +149,7 @@ function toAdminLocationProfile(
 }
 
 function loadPersistedAdminHubProfile(): AdminLocationProfile | null {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
   try {
     const raw = localStorage.getItem(ADMIN_HUB_STORAGE_KEY);
     if (!raw) return null;
@@ -153,6 +163,7 @@ function loadPersistedAdminHubProfile(): AdminLocationProfile | null {
 }
 
 function savePersistedAdminHubProfile(profile: AdminLocationProfile): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   try {
     const normalized = toAdminLocationProfile(
       profile.address,
@@ -178,68 +189,91 @@ export function resolveLiveTransactionAdminLocation(
   registeredUsers: UserProfile[] = [],
   adminProfile?: AdminLocationProfile | null
 ): SupermarketLocation {
+  const isGenericDumagueteCenter = (lat?: number, lng?: number) => {
+    if (typeof lat !== 'number' || typeof lng !== 'number') return true;
+    return Math.abs(lat - 9.3068) < 0.002 && Math.abs(lng - 123.3054) < 0.002;
+  };
+
+  const sanitizeAdminAddress = (addr?: string): string => {
+    if (!addr || !addr.trim()) return DEFAULT_SUPERMARKET.address;
+    const lower = addr.trim().toLowerCase();
+    if (
+      lower === 'dumaguete city' ||
+      lower === 'dumaguete city, negros oriental' ||
+      lower === 'dumaguete' ||
+      lower === 'dgte' ||
+      lower === 'dumaguete city proper'
+    ) {
+      return DEFAULT_SUPERMARKET.address;
+    }
+    return addr.trim();
+  };
+
   const savedSupermarket = resolveSupermarketLocation();
   const savedHasCustomPin =
-    savedSupermarket.latitude !== DEFAULT_SUPERMARKET.latitude ||
-    savedSupermarket.longitude !== DEFAULT_SUPERMARKET.longitude;
+    typeof savedSupermarket.latitude === 'number' &&
+    typeof savedSupermarket.longitude === 'number' &&
+    !isGenericDumagueteCenter(savedSupermarket.latitude, savedSupermarket.longitude) &&
+    (savedSupermarket.latitude !== DEFAULT_SUPERMARKET.latitude ||
+      savedSupermarket.longitude !== DEFAULT_SUPERMARKET.longitude);
 
-  // The dedicated admin hub is authoritative whenever it has a real pin. It is
-  // stored separately from the farmer session so the marker can never inherit
-  // the signed-in farmer's coordinates.
+  // The dedicated admin hub is authoritative whenever it has a real pin on the
+  // Eastern coastline (Dumaguete Port / Rizal Boulevard area, right side of the map).
   const persistedHub = loadPersistedAdminHubProfile();
   const persistedHubPin = persistedHub && toGpsPin(persistedHub.latitude, persistedHub.longitude);
-  if (persistedHubPin) {
+  if (
+    persistedHubPin &&
+    persistedHubPin.lng >= 123.3000 &&
+    !isGenericDumagueteCenter(persistedHubPin.lat, persistedHubPin.lng)
+  ) {
     return {
-      ...savedSupermarket,
-      ...(persistedHub.address ? { address: persistedHub.address } : {}),
+      storeName: DEFAULT_SUPERMARKET.storeName,
+      address: sanitizeAdminAddress(persistedHub.address || savedSupermarket.address),
       latitude: persistedHubPin.lat,
       longitude: persistedHubPin.lng,
     };
   }
 
-  // Backfill/migrate the dedicated record from an existing saved admin pin so
-  // every later render uses the same authoritative source.
-  if (savedHasCustomPin) {
+  // Backfill/migrate the dedicated record from an existing saved admin pin on the East
+  if (
+    savedHasCustomPin &&
+    savedSupermarket.longitude >= 123.3000 &&
+    !isGenericDumagueteCenter(savedSupermarket.latitude, savedSupermarket.longitude)
+  ) {
     savePersistedAdminHubProfile({
-      address: savedSupermarket.address,
+      address: sanitizeAdminAddress(savedSupermarket.address),
       latitude: savedSupermarket.latitude,
       longitude: savedSupermarket.longitude,
     });
-    return savedSupermarket;
+    return {
+      storeName: DEFAULT_SUPERMARKET.storeName,
+      address: sanitizeAdminAddress(savedSupermarket.address),
+      latitude: savedSupermarket.latitude,
+      longitude: savedSupermarket.longitude,
+    };
   }
 
-  // No dedicated store pin has been saved yet: fall back to the admin's own
-  // GPS/address so the marker is not left at the generic Dumaguete default.
+  // Check explicit admin GPS pin from registered admin profile only if on the East
   const adminAccount = adminProfile || getAdminProfileForLocationFallback(null, registeredUsers);
-  if (!adminAccount) {
-    return savedSupermarket;
+  if (adminAccount) {
+    const adminPin = toGpsPin(adminAccount.latitude, adminAccount.longitude);
+    if (
+      adminPin &&
+      adminPin.lng >= 123.3000 &&
+      !isGenericDumagueteCenter(adminPin.lat, adminPin.lng)
+    ) {
+      return {
+        storeName: DEFAULT_SUPERMARKET.storeName,
+        address: sanitizeAdminAddress(adminAccount.address || savedSupermarket.address),
+        latitude: adminPin.lat,
+        longitude: adminPin.lng,
+      };
+    }
   }
 
-  const adminPin = toGpsPin(adminAccount.latitude, adminAccount.longitude);
-  if (adminPin) {
-    return {
-      ...savedSupermarket,
-      address: adminAccount.address || savedSupermarket.address,
-      latitude: adminPin.lat,
-      longitude: adminPin.lng,
-    };
-  }
-
-  if (adminAccount.address) {
-    const resolved = resolveCoordinates(
-      adminAccount.address,
-      adminAccount.latitude,
-      adminAccount.longitude
-    );
-    return {
-      ...savedSupermarket,
-      address: adminAccount.address,
-      latitude: resolved.lat,
-      longitude: resolved.lng,
-    };
-  }
-
-  return savedSupermarket;
+  // The authoritative Supermarket Hub is at Rizal Boulevard & Port Area, Dumaguete City Proper
+  // on the eastern waterfront (right side of the map/image, lng 123.3105).
+  return DEFAULT_SUPERMARKET;
 }
 
 // Origin point of the live route map
@@ -327,13 +361,45 @@ export function resolveFarmHouseCoordinates(lookup: FarmHouseLookup): FarmHouse 
   const normalizedFarm = effectiveFarmName?.trim().toLowerCase();
   const normalizedFarmer = effectiveFarmerName?.trim().toLowerCase();
 
+  const isGenericDumagueteOrDowntown = (lat?: number, lng?: number) => {
+    if (typeof lat !== 'number' || typeof lng !== 'number') return true;
+    if (lng >= 123.2850) return true;
+    return Math.abs(lat - 9.3068) < 0.002 && Math.abs(lng - 123.3054) < 0.002;
+  };
+
+  const sanitizeFarmAddress = (addr?: string): string => {
+    if (!addr || !addr.trim()) return 'Valencia Highland Agricultural Valley, Negros Oriental';
+    const lower = addr.trim().toLowerCase();
+    if (
+      lower === 'dumaguete city' ||
+      lower === 'dumaguete city, negros oriental' ||
+      lower === 'dumaguete' ||
+      lower === 'dgte' ||
+      lower === 'dumaguete city proper'
+    ) {
+      return 'Valencia Highland Agricultural Valley, Negros Oriental';
+    }
+    return addr.trim();
+  };
+
+  // Helper to ensure the farm coordinates remain on the Western agricultural foothills (Left side of map)
+  const sanitizeFarmCoordinates = (pin?: Coordinates | null): Coordinates => {
+    if (!pin) return DEFAULT_FARM_COORDINATES;
+    // In Negros Oriental, agricultural farms are situated in the western valleys (Mount Talinis / Valencia / Apolong).
+    // If the pin is >= 123.2850 (downtown Dumaguete or coast) or center fallback, anchor the farm to the western agricultural valley.
+    if (isGenericDumagueteOrDowntown(pin.lat, pin.lng)) {
+      return DEFAULT_FARM_COORDINATES;
+    }
+    return pin;
+  };
+
   // 1. Exact GPS pin handed in by the caller
   const requestedPin = toGpsPin(latitude, longitude);
-  if (requestedPin) {
+  if (requestedPin && !isGenericDumagueteOrDowntown(requestedPin.lat, requestedPin.lng)) {
     return {
-      coords: requestedPin,
+      coords: sanitizeFarmCoordinates(requestedPin),
       label: effectiveFarmName || effectiveFarmerName || 'Farmer House',
-      address: locationText || '',
+      address: sanitizeFarmAddress(locationText),
       source: 'pin',
     };
   }
@@ -346,11 +412,11 @@ export function resolveFarmHouseCoordinates(lookup: FarmHouseLookup): FarmHouse 
       (normalizedFarmer && u.name && u.name.trim().toLowerCase() === normalizedFarmer)
   );
   const accountPin = account ? toGpsPin(account.latitude, account.longitude) : null;
-  if (account && accountPin) {
+  if (account && accountPin && !isGenericDumagueteOrDowntown(accountPin.lat, accountPin.lng)) {
     return {
-      coords: accountPin,
+      coords: sanitizeFarmCoordinates(accountPin),
       label: account.farmName || account.name || effectiveFarmName || 'Farmer House',
-      address: account.location,
+      address: sanitizeFarmAddress(account.location),
       source: 'account',
     };
   }
@@ -363,21 +429,26 @@ export function resolveFarmHouseCoordinates(lookup: FarmHouseLookup): FarmHouse 
       (normalizedFarmer && p.farmerName && p.farmerName.trim().toLowerCase() === normalizedFarmer)
   );
   const producePin = produce ? toGpsPin(produce.latitude, produce.longitude) : null;
-  if (produce && producePin) {
+  if (produce && producePin && !isGenericDumagueteOrDowntown(producePin.lat, producePin.lng)) {
     return {
-      coords: producePin,
+      coords: sanitizeFarmCoordinates(producePin),
       label: produce.farmName || effectiveFarmName || 'Farmer House',
-      address: produce.location,
+      address: sanitizeFarmAddress(produce.location),
       source: 'produce',
     };
   }
 
-  // 4. Last resort: geocode the textual address
-  const address = locationText || account?.location || produce?.location || '';
+  // 4. Last resort: geocode the textual address (default to western farm valley if blank or centered downtown)
+  const rawAddress = locationText || account?.location || produce?.location || '';
+  const address = sanitizeFarmAddress(rawAddress);
+  let resolvedCoords = resolveCoordinates(address);
+  if (!address || isGenericDumagueteOrDowntown(resolvedCoords.lat, resolvedCoords.lng)) {
+    resolvedCoords = DEFAULT_FARM_COORDINATES;
+  }
   return {
-    coords: resolveCoordinates(address),
+    coords: resolvedCoords,
     label: effectiveFarmName || effectiveFarmerName || account?.farmName || produce?.farmName || 'Farmer House',
-    address,
+    address: address,
     source: 'location',
   };
 }

@@ -238,12 +238,32 @@ async function tryConnectMysql() {
 
 tryConnectMysql();
 
-// In-memory store (empty by default - users register and list produce individually)
-let inMemoryUsers: any[] = [];
+// In-memory store (seeds system admin with official Supermarket Hub location on the East coast)
+let inMemoryUsers: any[] = [
+  {
+    id: 'admin-main',
+    name: 'VeggieConnect Admin Desk',
+    email: 'admin@gmail.com',
+    phone: '+63 900 000 0000',
+    role: 'admin',
+    location: 'Rizal Boulevard & Port Area, Dumaguete City Proper, Negros Oriental',
+    latitude: 9.3080,
+    longitude: 123.3105,
+    verified: true,
+    status: 'active',
+    avatar: '',
+  },
+];
 let inMemoryProducts: any[] = [];
 let inMemoryOrders: any[] = [];
 let inMemoryTransportJobs: any[] = [];
 let inMemoryMessages: any[] = [];
+let inMemorySupermarket: any = {
+  storeName: 'VeggieConnect Central Supermarket Hub',
+  address: 'Rizal Boulevard & Port Area, Dumaguete City Proper, Negros Oriental',
+  latitude: 9.3080,
+  longitude: 123.3105,
+};
 
 // --- API ENDPOINTS ---
 
@@ -437,11 +457,13 @@ app.post('/api/auth/login', async (req, res) => {
       }
       const adminUser = {
         id: 'admin-main',
-        name: 'System Administrator',
+        name: 'VeggieConnect Admin Desk',
         email: 'admin@gmail.com',
         phone: '+63 900 000 0000',
         role: 'admin',
-        location: 'Dumaguete City, Negros Oriental',
+        location: 'Rizal Boulevard & Port Area, Dumaguete City Proper, Negros Oriental',
+        latitude: 9.3080,
+        longitude: 123.3105,
         verified: true,
         status: 'active',
         avatar: '',
