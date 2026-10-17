@@ -415,10 +415,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     resolveLiveTransactionAdminLocation(registeredUsers, adminProfile)
   );
 
+  // True once the user taps/drags the pin or edits the fields — blocks the
+  // re-read below from snapping the pin back to the saved location mid-edit.
+  const [supermarketDirty, setSupermarketDirty] = useState(false);
+
   // Re-read the authoritative saved location whenever the admin profile or
-  // registered-admin fallback data changes.
+  // registered-admin fallback data changes — but NEVER while the user is
+  // mid-edit (that is what snapped the pin back to its original position).
   useEffect(() => {
+    if (supermarketDirty) return;
     setSupermarket(resolveLiveTransactionAdminLocation(registeredUsers, adminProfile));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminProfile, registeredUsers, adminLocationSyncTick]);
 
   const [isLocating, setIsLocating] = useState(false);
@@ -440,6 +447,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   // Move the supermarket pin (map tap, marker drag or GPS) and resolve its address
   const handlePinSupermarket = (lat: number, lng: number) => {
     if (isNaN(lat) || isNaN(lng)) return;
+    setSupermarketDirty(true);
     setSupermarket((prev) => ({
       ...prev,
       latitude: lat,
@@ -493,10 +501,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           longitude: supermarket.longitude,
         });
       }
+      // Only mark the form clean once everything persisted — if the write had
+      // failed, clearing the flag would let the re-read effect snap the pin
+      // back while the toast still claims the location was saved.
+      setSupermarketDirty(false);
+      showToast('Supermarket location saved to your profile!');
     } catch (err) {
       console.error('Failed to save supermarket location', err);
+      showToast('Could not save your location. Please try again.');
     }
-    showToast('Supermarket location saved to your profile!');
   };
 
   // Handle Admin Login submission
@@ -1847,9 +1860,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     </div>
                     <div className="min-w-0">
                       <p className="text-xs font-bold text-amber-950 truncate">
-                        {stats.pendingTransporters} Hauler{stats.pendingTransporters > 1 ? 's' : ''} Awaiting KYC
+                        {stats.pendingTransporters} Driver{stats.pendingTransporters > 1 ? 's' : ''} Awaiting Account Approval
                       </p>
-                      <p className="text-[10px] text-amber-800">Tap to review & approve vehicle</p>
+                      <p className="text-[10px] text-amber-800">Tap to review & approve driver credentials</p>
                     </div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-amber-600 flex-shrink-0" />
@@ -1863,28 +1876,29 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-3 text-center space-y-0.5">
                       <span className="text-[10px] text-emerald-800 uppercase font-bold">Registered Farmers</span>
                       <p className="text-xl font-extrabold text-emerald-950 font-display">{stats.farmers}</p>
+                      <span className="text-[9px] text-emerald-600 font-medium">Vegetable growers</span>
                     </div>
 
                     <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-3 text-center space-y-0.5">
-                      <span className="text-[10px] text-amber-800 uppercase font-bold">Active Haulers</span>
+                      <span className="text-[10px] text-amber-800 uppercase font-bold">Delivery Drivers</span>
                       <p className="text-xl font-extrabold text-amber-950 font-display">{stats.transporters}</p>
                       <span className="text-[9px] text-amber-600 font-medium">{stats.pendingTransporters} pending review</span>
                     </div>
 
                     <div className="bg-sky-50/70 border border-sky-200 rounded-2xl p-3 text-center space-y-0.5">
-                      <span className="text-[10px] text-sky-800 uppercase font-bold">Live Crops</span>
+                      <span className="text-[10px] text-sky-800 uppercase font-bold">Listed Vegetables</span>
                       <p className="text-xl font-extrabold text-sky-950 font-display">{stats.totalCrops}</p>
-                      <span className="text-[9px] text-sky-600 font-medium">Farm-gate listings</span>
+                      <span className="text-[9px] text-sky-600 font-medium">From local farms</span>
                     </div>
 
                     <div className="bg-purple-50/70 border border-purple-200 rounded-2xl p-3 text-center space-y-0.5">
-                      <span className="text-[10px] text-purple-800 uppercase font-bold">Total GMV</span>
+                      <span className="text-[10px] text-purple-800 uppercase font-bold">Total Sales (Orders)</span>
                       <p className="text-xl font-extrabold text-purple-950 font-display">₱{stats.totalOrderValue.toLocaleString()}</p>
-                      <span className="text-[9px] text-purple-600 font-medium">{stats.totalOrders} transactions</span>
+                      <span className="text-[9px] text-purple-600 font-medium">{stats.totalOrders} total orders placed</span>
                     </div>
                   </div>
 
-                  {/* Supermarket Inventory & Procured Stocks Card */}
+                  {/* Supermarket Inventory & Stocking Card */}
                   <div
                     onClick={() => setAdminTab('stocks')}
                     className="bg-gradient-to-r from-emerald-800 via-teal-800 to-emerald-900 text-white rounded-3xl p-3.5 space-y-2 shadow-xs cursor-pointer hover:opacity-95 transition-all"
@@ -1895,9 +1909,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           <Boxes className="w-4 h-4" />
                         </div>
                         <div>
-                          <h4 className="font-bold text-xs text-white">Supermarket Store Stocks</h4>
+                          <h4 className="font-bold text-xs text-white">Store Inventory & Stocking</h4>
                           <p className="text-[10px] text-emerald-200">
-                            {ownedBoughtProducts.length} Procured Lots • {supermarketStoreProducts.length} Active in Store
+                            {ownedBoughtProducts.length} Items Bought from Farmers • {supermarketStoreProducts.length} On Store Shelves
                           </p>
                         </div>
                       </div>
@@ -1905,25 +1919,25 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     </div>
                     {unstockedBoughtCount > 0 ? (
                       <div className="bg-amber-400 text-amber-950 font-bold text-[10px] px-2.5 py-1 rounded-xl flex items-center justify-between">
-                        <span>⚠️ {unstockedBoughtCount} bought & delivered product{unstockedBoughtCount > 1 ? 's' : ''} ready to put in store stock!</span>
-                        <span className="underline font-black">Manage Stocks →</span>
+                        <span>⚠️ {unstockedBoughtCount} item{unstockedBoughtCount > 1 ? 's' : ''} bought from farmers ready to put on store shelf!</span>
+                        <span className="underline font-black">Put on Shelf →</span>
                       </div>
                     ) : (
                       <div className="bg-emerald-950/40 text-emerald-200 text-[10px] px-2.5 py-1 rounded-xl flex items-center justify-between">
-                        <span>All procured crops stocked on store shelves</span>
-                        <span className="underline font-bold">Open Stocks Tab →</span>
+                        <span>All bought vegetables are stocked on store shelves</span>
+                        <span className="underline font-bold">Open Inventory →</span>
                       </div>
                     )}
                   </div>
 
-                  {/* Daily DA Bantay Presyo (SRP) Summary with View Full Bulletin Action */}
+                  {/* Daily DA Bantay Presyo (SRP) Summary */}
                   <div className="bg-white border border-neutral-200 rounded-3xl p-4 space-y-2.5 shadow-xs">
                     <div className="flex items-center justify-between">
                       <div>
                         <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">
-                          DA Bantay Presyo (Prevailing Retail)
+                          DA Market Price Guide (Official Suggested SRP)
                         </h3>
-                        <p className="text-[10px] text-neutral-500">Official price monitoring for Dumaguete</p>
+                        <p className="text-[10px] text-neutral-500">Government price benchmark for Dumaguete markets</p>
                       </div>
                       <button
                         onClick={() => setAdminTab('prices')}
@@ -2060,17 +2074,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                             {/* Price Grid Breakdown */}
                             <div className="grid grid-cols-3 gap-1.5 bg-neutral-50 p-2 rounded-2xl text-center border border-neutral-150">
                               <div>
-                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Prevailing SRP</span>
+                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Store Price (SRP)</span>
                                 <p className="text-xs font-bold text-neutral-900 font-mono">₱{item.prevailingRetailPrice}</p>
                               </div>
                               <div className="border-x border-neutral-200 px-1">
-                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Official Range</span>
+                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Price Range</span>
                                 <p className="text-xs font-bold text-neutral-800 font-mono">
                                   ₱{item.priceRangeMin}-{item.priceRangeMax}
                                 </p>
                               </div>
                               <div>
-                                <span className="text-[9px] text-emerald-800 uppercase font-semibold">Farm-Gate</span>
+                                <span className="text-[9px] text-emerald-800 uppercase font-semibold">Farmer Cost</span>
                                 <p className="text-xs font-bold text-emerald-700 font-mono">₱{item.prevailingFarmgatePrice}</p>
                               </div>
                             </div>
@@ -2239,7 +2253,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   onClick={() => handleApproveTransporter(u)}
                                   className="flex-1 py-1.5 px-3 bg-amber-500 hover:bg-amber-600 text-white font-extrabold text-[11px] rounded-xl shadow-xs cursor-pointer"
                                 >
-                                  Approve Hauler KYC ✓
+                                  Approve Driver Account ✓
                                 </button>
                               ) : (
                                 <div className="flex items-center gap-1">
@@ -2351,7 +2365,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       <h4 className="font-bold text-xs text-neutral-900 truncate">{p.name}</h4>
                                       {isFullyProcured ? (
                                         <span className="text-[9px] font-bold bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded-md">
-                                          ✓ 100% Procured ({p.boughtQuantity || 0}kg in Supermarket)
+                                          ✓ 100% Bought by Admin ({p.boughtQuantity || 0}kg in Store)
                                         </span>
                                       ) : isPartiallyProcured ? (
                                         <span className="text-[9px] font-bold bg-blue-100 text-blue-900 px-1.5 py-0.2 rounded-md">
@@ -2374,7 +2388,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 </div>
 
                                 <div className="bg-neutral-50 p-2.5 rounded-xl text-[11px] flex justify-between items-center text-neutral-700">
-                                  <span>{isFullyProcured ? 'Harvest Stock Procured:' : 'Remaining Farmer Stock:'}</span>
+                                  <span>{isFullyProcured ? 'Quantity Purchased by Admin:' : 'Remaining Farmer Stock:'}</span>
                                   <span className={`font-bold px-2 py-0.5 rounded border ${isFullyProcured ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'text-neutral-900 bg-white border-neutral-200'}`}>
                                     {isFullyProcured ? `0 ${p.unit}s (All ${p.boughtQuantity || 0} kg bought)` : `${p.stockQuantity} ${p.unit}s available`}
                                   </span>
@@ -2405,7 +2419,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       className="flex-1 py-2 px-3 bg-neutral-200 text-neutral-500 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-not-allowed"
                                     >
                                       <CheckCircle2 className="w-3.5 h-3.5" />
-                                      <span>Fully Procured</span>
+                                      <span>Fully Purchased</span>
                                     </button>
                                   ) : (
                                     <button
@@ -2416,7 +2430,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl shadow-xs cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 transition-all"
                                     >
                                       <ShoppingBag className="w-3.5 h-3.5" />
-                                      <span>Buy Produce</span>
+                                      <span>Buy Wholesale from Farmer</span>
                                     </button>
                                   )}
                                 </div>
@@ -2735,13 +2749,13 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 {/* Financial Summary Pill */}
                                 <div className="grid grid-cols-2 gap-2 bg-neutral-50 p-2.5 rounded-2xl text-[11px] border border-neutral-150">
                                   <div>
-                                    <span className="text-[9px] text-neutral-500 uppercase font-semibold block">Cost Price Paid:</span>
+                                    <span className="text-[9px] text-neutral-500 uppercase font-semibold block">Bought from Farmer at:</span>
                                     <span className="font-extrabold text-amber-800 font-mono">
                                       ₱{item.costPricePerUnit.toFixed(2)}/{item.unit}
                                     </span>
                                   </div>
                                   <div className="text-right border-l border-neutral-200 pl-2">
-                                    <span className="text-[9px] text-neutral-500 uppercase font-semibold block">Total Farmgate Payout:</span>
+                                    <span className="text-[9px] text-neutral-500 uppercase font-semibold block">Total Paid to Farmer:</span>
                                     <span className="font-extrabold text-neutral-900 font-mono">
                                       ₱{item.totalCost.toFixed(2)}
                                     </span>
@@ -2759,21 +2773,21 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   <span>{new Date(item.dateBought).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                                 </div>
 
-                                {/* Primary Action: Put in Supermarket Store Stock Button */}
+                                {/* Primary Action: Put on Store Shelf Button */}
                                 <div className="pt-1">
                                   {canShelve ? (
                                     <div className="space-y-1.5">
                                       <button
                                         id={`btn-stock-${item.id}`}
                                         onClick={() => handleOpenPutInStockModal(item)}
-                                        title="Put units from this bought lot on the supermarket shelf"
+                                        title="Put units from this bought lot on the store shelf"
                                         className="w-full py-2.5 px-3 text-white text-xs font-black rounded-xl shadow-xs flex items-center justify-center gap-2 transition-all active:scale-95 bg-emerald-600 hover:bg-emerald-700 cursor-pointer"
                                       >
                                         <Store className="w-4 h-4" />
                                         <span>
                                           {isStocked
-                                            ? `Put More in Stock (${readyQty} ${item.unit}s remaining in pool)`
-                                            : `Put in Supermarket Store Stock (${readyQty} ${item.unit}s)`}
+                                            ? `Put More on Shelf (${readyQty} ${item.unit}s remaining in inventory)`
+                                            : `Put on Store Shelf (${readyQty} ${item.unit}s)`}
                                         </span>
                                       </button>
                                     </div>
@@ -3725,7 +3739,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <input
                         type="text"
                         value={supermarket.storeName}
-                        onChange={(e) => setSupermarket((prev) => ({ ...prev, storeName: e.target.value }))}
+                        onChange={(e) => { setSupermarketDirty(true); setSupermarket((prev) => ({ ...prev, storeName: e.target.value })); }}
                         placeholder="e.g. VeggieConnect Central Supermarket Hub"
                         className="w-full bg-neutral-50 border border-neutral-300 rounded-xl px-3 py-2.5 text-xs font-semibold text-neutral-900 focus:bg-white focus:outline-none focus:border-emerald-600"
                       />
@@ -3743,7 +3757,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <input
                         type="text"
                         value={supermarket.address}
-                        onChange={(e) => setSupermarket((prev) => ({ ...prev, address: e.target.value }))}
+                        onChange={(e) => { setSupermarketDirty(true); setSupermarket((prev) => ({ ...prev, address: e.target.value })); }}
                         placeholder="Barangay, City, Negros Oriental"
                         className="w-full bg-neutral-50 border border-neutral-300 rounded-xl px-3 py-2.5 text-xs font-semibold text-neutral-900 focus:bg-white focus:outline-none focus:border-emerald-600"
                       />
@@ -4888,8 +4902,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   <Store className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-xs text-neutral-900">Put in Supermarket Store Stock</h3>
-                  <p className="text-[10px] text-neutral-500">Add procured crop to retail store shelf</p>
+                  <h3 className="font-bold text-xs text-neutral-900">Put on Store Shelf</h3>
+                  <p className="text-[10px] text-neutral-500">Make this vegetable available for buyers to purchase</p>
                 </div>
               </div>
               <button
@@ -4910,17 +4924,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   </p>
                 </div>
                 <span className="text-[10px] font-bold bg-emerald-200 text-emerald-950 px-2 py-0.5 rounded-full">
-                  Procured
+                  Bought from Farmer
                 </span>
               </div>
               <div className="flex items-center justify-between text-[11px] pt-1 border-t border-emerald-200/60">
-                <span>Farmgate Cost Paid:</span>
+                <span>Cost Paid to Farmer:</span>
                 <span className="font-bold font-mono text-amber-800">
                   ₱{puttingInStockItem.costPricePerUnit.toFixed(2)}/{puttingInStockItem.unit || 'kg'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-[11px]">
-                <span>Total Quantity Owned/Bought:</span>
+                <span>Total Quantity Bought:</span>
                 <span className="font-bold text-neutral-900">
                   {puttingInStockItem.quantityBought} {puttingInStockItem.unit || 'kg'}s
                 </span>
@@ -4985,7 +4999,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               {/* Input 2: Resale Retail Price */}
               <div>
                 <label className="block text-[11px] font-bold text-neutral-700 mb-1">
-                  Supermarket Retail Resale Price (₱/{puttingInStockItem.unit || 'kg'})
+                  Store Selling Price to Buyers (₱/{puttingInStockItem.unit || 'kg'})
                 </label>
                 <div className="relative">
                   <input
@@ -5004,13 +5018,13 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {/* Profit Margin Preview */}
                 <div className="mt-1 flex items-center justify-between text-[10px]">
                   <span className="text-emerald-700 font-bold">
-                    Markup / Margin: +₱{(stockModalPrice - puttingInStockItem.costPricePerUnit).toFixed(2)}/
+                    Your Profit: +₱{(stockModalPrice - puttingInStockItem.costPricePerUnit).toFixed(2)}/
                     {puttingInStockItem.unit || 'kg'} (
                     {(((stockModalPrice - puttingInStockItem.costPricePerUnit) / puttingInStockItem.costPricePerUnit) * 100).toFixed(1)}
-                    %)
+                    % margin)
                   </span>
                   <span className="text-neutral-400 font-mono">
-                    Total Potential: ₱{(stockModalPrice * stockModalQty).toFixed(2)}
+                    Total Estimated Sales: ₱{(stockModalPrice * stockModalQty).toFixed(2)}
                   </span>
                 </div>
               </div>

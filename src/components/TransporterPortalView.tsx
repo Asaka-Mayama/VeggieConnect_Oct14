@@ -45,6 +45,8 @@ const GOOGLE_MAPS_API_KEY =
   (import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY ||
   'AIzaSyCvp4aWzRvgEYkREXOkUqQL1ZL9nFLnC7M';
 
+declare const google: any;
+
 interface TransporterPortalViewProps {
   transporter: UserProfile;
   jobs: TransportJob[];
@@ -175,10 +177,10 @@ const MapRouteAndBoundsController: React.FC<{
             travelMode: google.maps.TravelMode.DRIVING,
             optimizeWaypoints: false,
           },
-          (result, status) => {
+          (result: any, status: any) => {
             if (!isMounted) return;
             if (status === google.maps.DirectionsStatus.OK && result && result.routes[0]) {
-              const fullPath: Coordinates[] = result.routes[0].overview_path.map((p) => ({
+              const fullPath: Coordinates[] = result.routes[0].overview_path.map((p: any) => ({
                 lat: p.lat(),
                 lng: p.lng(),
               }));
@@ -186,7 +188,7 @@ const MapRouteAndBoundsController: React.FC<{
 
               let totalMeters = 0;
               let totalSeconds = 0;
-              result.routes[0].legs.forEach((leg) => {
+              result.routes[0].legs.forEach((leg: any) => {
                 totalMeters += leg.distance?.value || 0;
                 totalSeconds += leg.duration?.value || 0;
               });

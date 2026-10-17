@@ -19,6 +19,7 @@ import { ProfileMenuView } from './components/ProfileMenuView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DAPriceWatchModal } from './components/DAPriceWatchModal';
 import { AddressMapPickerModal } from './components/AddressMapPickerModal';
+import { SystemGuidePage } from './components/SystemGuidePage';
 import { calculateDistanceKm, calculateDistanceBetween, resolveCoordinates } from './utils/geoDistance';
 import { appSync } from './utils/appSync';
 import { INITIAL_PRODUCE, INITIAL_FARMERS, INITIAL_ORDERS, INITIAL_TRANSPORT_JOBS } from './data/mockData';
@@ -73,6 +74,15 @@ export default function App() {
 
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => checkIsAdminRoute());
 
+  // Route detection: public Project Guide page at /system
+  const checkIsSystemRoute = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const path = window.location.pathname.toLowerCase();
+    return path === '/system' || path === '/system/';
+  };
+
+  const [isSystemRoute, setIsSystemRoute] = useState<boolean>(() => checkIsSystemRoute());
+
   // Determine admin subpath: 'admin' or 'sql'
   const getAdminPath = (): 'admin' | 'sql' => {
     if (typeof window === 'undefined') return 'admin';
@@ -86,6 +96,7 @@ export default function App() {
     const handleLocationChange = () => {
       setIsAdminRoute(checkIsAdminRoute());
       setAdminPath(getAdminPath());
+      setIsSystemRoute(checkIsSystemRoute());
     };
 
     window.addEventListener('popstate', handleLocationChange);
@@ -1213,7 +1224,7 @@ export default function App() {
     produceId?: string;
     boughtQuantity?: number;
   }) => {
-    let resultingItem: ProduceItem;
+    let resultingItem: ProduceItem | undefined;
 
     const norm = (s: string) => (s || '').toLowerCase().replace(/\(.*?\)/g, '').replace(/[^a-z0-9]/g, '').trim();
     const isMatch = (a: string, b: string) => {
@@ -1267,7 +1278,7 @@ export default function App() {
             existing.description ||
             `Fresh harvest in Negros Oriental. Quality-inspected and stocked in VeggieConnect Supermarket for retail buyers.`,
         };
-        nextList = prev.map((p) => (p.id === existing.id ? resultingItem : p));
+        nextList = prev.map((p) => (p.id === existing.id ? resultingItem! : p));
 
         fetch(`/api/products/${existing.id}`, {
           method: 'PUT',
@@ -1310,7 +1321,7 @@ export default function App() {
           boughtAt: new Date().toISOString(),
           sourcingRegion: itemData.farmerName ? `${itemData.farmerName} (${itemData.farmName || 'Local Farm'})` : 'Local Farmer Partner',
         };
-        nextList = [resultingItem, ...prev];
+        nextList = [resultingItem!, ...prev];
 
         fetch('/api/products', {
           method: 'POST',
@@ -1357,7 +1368,9 @@ export default function App() {
       );
     } catch (e) {}
 
-    appSync.publish('PRODUCE_UPDATED', resultingItem, 'admin');
+    if (resultingItem) {
+      appSync.publish('PRODUCE_UPDATED', resultingItem, 'admin');
+    }
     showToast(`✓ "${itemData.name}" (${itemData.stockQuantity} ${itemData.unit || 'kg'} @ ₱${itemData.pricePerUnit}/${itemData.unit || 'kg'}) is now live in Supermarket Stock!`);
   };
 
@@ -1928,6 +1941,11 @@ export default function App() {
     localStorage.removeItem(STORAGE_KEYS.USER);
     showToast('Logged out. Switched to login screen.');
   };
+
+  // IF AT /system ROUTE: Render public Project Guide page (no login needed)
+  if (isSystemRoute) {
+    return <SystemGuidePage />;
+  }
 
   // IF AT /admin ROUTE: Render Standalone Admin App
   if (isAdminRoute) {

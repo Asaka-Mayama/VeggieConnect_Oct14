@@ -179,11 +179,51 @@ function savePersistedAdminHubProfile(profile: AdminLocationProfile): void {
 }
 
 /**
+ * Raw record the admin saved from Admin > Profile — `null` when no explicit
+ * save exists yet (the resolver then falls back to account/default coords).
+ */
+function loadSavedSupermarketRecord(): Partial<SupermarketLocation> | null {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(SUPERMARKET_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SupermarketLocation> | null;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (e) {
+    console.error('Failed to parse saved supermarket location', e);
+    return null;
+  }
+}
+
+/**
+ * Numeric pair check for an explicitly saved pin. Deliberately applies NO
+ * region heuristics — what the admin saved is what shows on the map.
+ */
+function toExplicitPin(
+  record?: { latitude?: number; longitude?: number } | null
+): Coordinates | null {
+  if (
+    record &&
+    typeof record.latitude === 'number' &&
+    typeof record.longitude === 'number' &&
+    !isNaN(record.latitude) &&
+    !isNaN(record.longitude)
+  ) {
+    return { lat: record.latitude, lng: record.longitude };
+  }
+  return null;
+}
+
+/**
  * Resolves the admin/supermarket endpoint shown on farmer live-transaction maps.
  *
- * The dedicated supermarket pin saved in Admin > Profile is authoritative because
- * it represents the store/admin logistics origin. It intentionally takes priority
- * over fallback coordinates derived from an admin account's textual address.
+ * Priority: an explicit pin saved from Admin > Profile (returned verbatim — it
+ * represents the store/admin logistics origin) → the dedicated admin-hub record
+ * → GPS attached to the admin account → the default Dumaguete hub. The
+ * "generic Dumaguete centre" heuristic only guards AUTO-derived fallback
+ * coordinates so placeholder geocodes never masquerade as a deliberate pin —
+ * it must never reject the admin's own save, or the marker snaps back to an
+ * older location the moment Save is pressed.
  */
 export function resolveLiveTransactionAdminLocation(
   registeredUsers: UserProfile[] = [],
@@ -210,56 +250,59 @@ export function resolveLiveTransactionAdminLocation(
   };
 
   const savedSupermarket = resolveSupermarketLocation();
-  const savedHasCustomPin =
-    typeof savedSupermarket.latitude === 'number' &&
-    typeof savedSupermarket.longitude === 'number' &&
-    !isGenericDumagueteCenter(savedSupermarket.latitude, savedSupermarket.longitude) &&
-    (savedSupermarket.latitude !== DEFAULT_SUPERMARKET.latitude ||
-      savedSupermarket.longitude !== DEFAULT_SUPERMARKET.longitude);
+  const savedPin = toExplicitPin(loadSavedSupermarketRecord());
 
-  // The dedicated admin hub is authoritative whenever it has a real pin on the
-  // Eastern coastline (Dumaguete Port / Rizal Boulevard area, right side of the map).
-  const persistedHub = loadPersistedAdminHubProfile();
-  const persistedHubPin = persistedHub && toGpsPin(persistedHub.latitude, persistedHub.longitude);
-  if (
-    persistedHubPin &&
-    persistedHubPin.lng >= 123.3000 &&
-    !isGenericDumagueteCenter(persistedHubPin.lat, persistedHubPin.lng)
-  ) {
+  // 1. A pin explicitly saved from Admin > Profile is ALWAYS authoritative.
+  //    The heuristics further down exist only to guard AUTO-derived fallback
+  //    coordinates; applying them to the admin's own deliberate save made the
+  //    marker snap back to an older location right after Save (whenever the
+  //    new pin landed on the generic Dumaguete-centre placeholder, matched
+  //    the default hub exactly, or fell outside the province bounds).
+  if (savedPin) {
+    // Keep the dedicated hub record in sync — legacy installs only carry the
+    // supermarket key, and farmer live-route maps read the hub record as
+    // their fallback source.
+    const hubRecord = loadPersistedAdminHubProfile();
+    const hubPin = toExplicitPin(hubRecord);
+    if (
+      !hubPin ||
+      hubPin.lat !== savedPin.lat ||
+      hubPin.lng !== savedPin.lng ||
+      (hubRecord?.address || '') !== (savedSupermarket.address || '')
+    ) {
+      savePersistedAdminHubProfile({
+        address: savedSupermarket.address,
+        latitude: savedPin.lat,
+        longitude: savedPin.lng,
+      });
+    }
     return {
-      storeName: DEFAULT_SUPERMARKET.storeName,
-      address: sanitizeAdminAddress(persistedHub.address || savedSupermarket.address),
+      storeName: savedSupermarket.storeName || DEFAULT_SUPERMARKET.storeName,
+      address: savedSupermarket.address || DEFAULT_SUPERMARKET.address,
+      latitude: savedPin.lat,
+      longitude: savedPin.lng,
+    };
+  }
+
+  // 2. A dedicated hub record written by an earlier save (supermarket key
+  //    missing) is still an explicit pin and outranks account fallbacks.
+  const persistedHub = loadPersistedAdminHubProfile();
+  const persistedHubPin = toExplicitPin(persistedHub);
+  if (persistedHubPin) {
+    return {
+      storeName: savedSupermarket.storeName || DEFAULT_SUPERMARKET.storeName,
+      address: persistedHub.address || savedSupermarket.address || DEFAULT_SUPERMARKET.address,
       latitude: persistedHubPin.lat,
       longitude: persistedHubPin.lng,
     };
   }
 
-  // Backfill/migrate the dedicated record from an existing saved admin pin on the East
-  if (
-    savedHasCustomPin &&
-    savedSupermarket.longitude >= 123.3000 &&
-    !isGenericDumagueteCenter(savedSupermarket.latitude, savedSupermarket.longitude)
-  ) {
-    savePersistedAdminHubProfile({
-      address: sanitizeAdminAddress(savedSupermarket.address),
-      latitude: savedSupermarket.latitude,
-      longitude: savedSupermarket.longitude,
-    });
-    return {
-      storeName: DEFAULT_SUPERMARKET.storeName,
-      address: sanitizeAdminAddress(savedSupermarket.address),
-      latitude: savedSupermarket.latitude,
-      longitude: savedSupermarket.longitude,
-    };
-  }
-
-  // Check explicit admin GPS pin from registered admin profile only if on the East
+  // 3. Check explicit admin GPS pin from registered admin profile
   const adminAccount = adminProfile || getAdminProfileForLocationFallback(null, registeredUsers);
   if (adminAccount) {
     const adminPin = toGpsPin(adminAccount.latitude, adminAccount.longitude);
     if (
       adminPin &&
-      adminPin.lng >= 123.3000 &&
       !isGenericDumagueteCenter(adminPin.lat, adminPin.lng)
     ) {
       return {

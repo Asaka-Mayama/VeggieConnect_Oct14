@@ -334,6 +334,7 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
             <span>👑 Store Owner Logistics</span>
           </div>
         </div>
+
       </div>
     );
   }

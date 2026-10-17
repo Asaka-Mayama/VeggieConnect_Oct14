@@ -308,7 +308,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         </span>
                       </div>
                       <span className="font-bold text-emerald-950 flex-shrink-0">
-                        ₱{(item.unitPrice * item.quantity).toFixed(2)}
+                        ₱{((item.unitPrice || item.pricePerUnit || 0) * item.quantity).toFixed(2)}
                       </span>
                     </div>
                   ))}
@@ -564,7 +564,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     {item.produceName} ({item.quantity} {item.unit})
                   </span>
                   <span className="font-bold text-emerald-950">
-                    ₱{(item.unitPrice * item.quantity).toFixed(2)}
+                    ₱{((item.unitPrice || item.pricePerUnit || 0) * item.quantity).toFixed(2)}
                   </span>
                 </div>
               ))}
